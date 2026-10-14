@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, BrowserView, Menu, MenuItem, globalShortcut, Tray, nativeImage, shell, net, Notification, clipboard, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, BrowserView, Menu, MenuItem, globalShortcut, Tray, nativeImage, shell, net, Notification, clipboard, dialog, session } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const Store = require('electron-store');
@@ -53,6 +53,10 @@ const settings = new Store();
 const NotificationManager = require('./notification-manager');
 const SearchService = require('./search-service');
 
+// Shown in the menu bar, window title, tray and notifications. package.json's top-level
+// productName stays "SimplexityAI" because it names the userData folder holding the login.
+const APP_DISPLAY_NAME = 'Simplex';
+
 const isMac = process.platform === 'darwin';
 const isWindows = process.platform === 'win32';
 const isLinux = process.platform === 'linux';
@@ -64,23 +68,33 @@ if (process.platform === 'win32') {
 let mainWindow;
 let currentView;
 
-// Two independent Perplexity workspaces. `views` is keyed by TAB ID, not by
-// URL: keying by URL meant two tabs pointing at the same site collapsed onto a
-// single cached BrowserView, so switching between them did nothing. Keying by
-// tab identity gives each tab its own BrowserView, and therefore its own
-// navigation history, scroll position and in-flight conversation.
-// Both tabs use the default Electron session, so cookies and localStorage --
-// and therefore the Perplexity login -- are shared between them.
-const TABS = [
-  { id: 'tab1', label: 'AI Search', home: 'https://perplexity.ai' },
-  { id: 'tab2', label: 'Second Tab', home: 'https://perplexity.ai' }
-];
-const DEFAULT_TAB_ID = TABS[0].id;
-const isTabId = (value) => TABS.some((tab) => tab.id === value);
-const tabHome = (tabId) => (TABS.find((tab) => tab.id === tabId) || TABS[0]).home;
+// Independent Perplexity workspaces, opened and closed from the tab bar.
+// `views` is keyed by TAB ID, not by URL: keying by URL meant two tabs pointing
+// at the same site collapsed onto a single cached BrowserView, so switching
+// between them did nothing. Keying by tab identity gives each tab its own
+// BrowserView, and therefore its own navigation history, scroll position and
+// in-flight conversation. All tabs use the default Electron session, so cookies
+// and localStorage -- and therefore the Perplexity login -- are shared.
+// Ids are `tab<n>`; 'tab1' and 'tab2' keep their old meaning for the defaultAI
+// setting and the two tab shortcuts, which reopen them if they were closed.
+const HOME_URL = 'https://perplexity.ai';
+const DEFAULT_TAB_ID = 'tab1';
+const TAB_ID_PATTERN = /^tab\d+$/;
+// Must match --tabbar-height in styles.css.
+const TAB_BAR_HEIGHT = 44;
+const tabHome = () => HOME_URL;
 
 let views = {};
+let tabOrder = [];
+let tabMeta = {};
+// See cleanupUnusedResources().
+const DISCARD_AFTER_MS = 30 * 60 * 1000;
+// Perplexity's sidebar out of the box: Finance takes Computer's place (see pageCSS).
+const DEFAULT_SIDEBAR_SHORTCUTS = ['finance'];
+let tabLastShown = {};
+let discardedUrls = {};
 let activeTabId = DEFAULT_TAB_ID;
+const isTabId = (value) => tabOrder.includes(value);
 let findBarOpen = false;
 let tray = null;
 let settingsWindow = null;
@@ -102,10 +116,10 @@ const UPDATE_CHECK_INTERVAL = 12 * 60 * 60 * 1000; // Check twice per day (every
 function configureAutoStart(enable) {
   try {
     if (isMac) {
-      // macOS implementation
+      // macOS implementation. Electron 44 removed the openAsHidden option, so
+      // the window now opens normally at login.
       app.setLoginItemSettings({
-        openAtLogin: enable,
-        openAsHidden: true  
+        openAtLogin: enable
       });
     } else if (isWindows) {
       // Windows implementation with hidden flag
@@ -456,20 +470,12 @@ function configureAppForBetterPerformance() {
     app.disableHardwareAcceleration();
   }
   
-  // Set chromium flags to reduce memory usage
-  app.commandLine.appendSwitch('js-flags', '--max-old-space-size=256');
-  app.commandLine.appendSwitch('disable-gpu-compositing');
-  app.commandLine.appendSwitch('disable-smooth-scrolling');
-  
-  // Optimize for low GPU memory
-  app.commandLine.appendSwitch('gpu-rasterization-msaa-sample-count', '0');
-  app.commandLine.appendSwitch('num-raster-threads', '1');
-  
-  app.commandLine.appendSwitch('enable-zero-copy'); 
-  app.commandLine.appendSwitch('enable-gpu-memory-buffer-compositor-resources');
-  app.commandLine.appendSwitch('enable-checker-imaging');
-  app.commandLine.appendSwitch('tile-width', '256');
-  app.commandLine.appendSwitch('tile-height', '256');
+  // No other Chromium switches on purpose. The old set cost more than it saved:
+  // disable-gpu-compositing put every frame on the CPU (getGPUFeatureStatus
+  // reported gpu_compositing "disabled_software"), num-raster-threads=1
+  // serialised painting, disable-smooth-scrolling made wheel scrolling step, and
+  // --max-old-space-size=256 capped the Perplexity page at a 280 MB heap, a
+  // ceiling a long session plus a large paste can reach.
 }
 
 function createWindow() {
@@ -492,14 +498,60 @@ function createWindow() {
       enableBlinkFeatures: 'PaintHolding',
       backgroundThrottling: true
     },
-    backgroundColor: '#FFFFFF',
+    // macOS: the tab bar sits in the title bar, beside the traffic lights, on
+    // the system's own translucent material (the page background is transparent).
+    ...(isMac
+      ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 18, y: 15 }, vibrancy: 'under-window', visualEffectState: 'active', backgroundColor: '#00000000' }
+      : { backgroundColor: '#FFFFFF' }),
     autoHideMenuBar: true
   });
 
   mainWindowState.manage(mainWindow);
 
-  // Application menu with Find and Zoom accelerators (menu bar hidden, accelerators still work)
+  const sendFullScreen = () => mainWindow.webContents.send('fullscreen-changed', mainWindow.isFullScreen());
+  mainWindow.on('enter-full-screen', sendFullScreen);
+  mainWindow.on('leave-full-screen', sendFullScreen);
+
+  // Application menu with Find and Zoom accelerators (menu bar hidden, accelerators still work).
+  // Cmd+Q, Cmd+W and Cmd+M only exist on macOS when a menu item carries them, so the app and
+  // window menus are needed, not decorative. They also hold what the removed sidebar offered.
+  const settingsItems = [
+    { label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: () => { detachAllShortcuts(); openSettingsWindow(); } },
+    { label: 'Notifications', click: () => notificationManager.showNotificationPanel() }
+  ];
+  // Close Tab acts on whichever window has focus, so Cmd+W in Settings closes Settings, not a tab.
+  const tabItems = [
+    { label: 'New Tab', accelerator: 'CmdOrCtrl+T', click: () => switchView(nextTabId()) },
+    {
+      label: 'Close Tab',
+      accelerator: 'CmdOrCtrl+W',
+      click: (item, focusedWindow) => {
+        if (!focusedWindow || focusedWindow === mainWindow) closeTab(activeTabId);
+        else focusedWindow.close();
+      }
+    }
+  ];
   const appMenu = Menu.buildFromTemplate([
+    ...(isMac ? [{
+      label: APP_DISPLAY_NAME,
+      submenu: [
+        { role: 'about', label: `About ${APP_DISPLAY_NAME}` },
+        { type: 'separator' },
+        ...settingsItems,
+        { type: 'separator' },
+        { role: 'hide', label: `Hide ${APP_DISPLAY_NAME}` },
+        { role: 'hideOthers' },
+        { role: 'unhide' },
+        { type: 'separator' },
+        { role: 'quit', label: `Quit ${APP_DISPLAY_NAME}` }
+      ]
+    }, {
+      label: 'File',
+      submenu: [...tabItems, { type: 'separator' }, { role: 'close', accelerator: 'Command+Shift+W' }]
+    }] : [{
+      label: 'File',
+      submenu: [...tabItems, { type: 'separator' }, ...settingsItems, { type: 'separator' }, { role: 'quit' }]
+    }]),
     {
       label: 'Edit',
       submenu: [
@@ -525,6 +577,14 @@ function createWindow() {
     {
       label: 'View',
       submenu: [
+        // Reload keeps the open thread; it is the way out when Perplexity's page gets stuck.
+        { label: 'Reload Page', accelerator: 'CmdOrCtrl+R', click: () => {
+          const view = views[activeTabId] || currentView;
+          if (view && !view.webContents.isDestroyed()) view.webContents.reload();
+        } },
+        // No accelerator: refresh goes back to the tab's home and drops the open thread.
+        { label: 'Go to Home', click: () => switchView('refresh') },
+        { type: 'separator' },
         {
           label: 'Zoom In',
           accelerator: 'CmdOrCtrl+=',
@@ -556,7 +616,26 @@ function createWindow() {
           }
         }
       ]
-    }
+    },
+    {
+      role: 'window',
+      submenu: [
+        { role: 'minimize' },
+        { role: 'zoom' },
+        { type: 'separator' },
+        { label: 'Show Next Tab', accelerator: 'Control+Tab', click: () => selectTabOffset(1) },
+        { label: 'Show Previous Tab', accelerator: 'Control+Shift+Tab', click: () => selectTabOffset(-1) },
+        // Cmd+1..8 pick that tab, Cmd+9 the last one, as in Safari.
+        ...Array.from({ length: 9 }, (_, i) => ({
+          label: i === 8 ? 'Last Tab' : `Tab ${i + 1}`,
+          accelerator: `CmdOrCtrl+${i + 1}`,
+          visible: false,
+          click: () => { const id = i === 8 ? tabOrder[tabOrder.length - 1] : tabOrder[i]; if (id) switchView(id); }
+        })),
+        ...(isMac ? [{ type: 'separator' }, { role: 'front' }] : [])
+      ]
+    },
+    { role: 'help', submenu: [{ label: 'Buy me a Coffee', click: () => switchView('https://donate.inulute.com') }] }
   ]);
   Menu.setApplicationMenu(appMenu);
   mainWindow.setMenuBarVisibility(false);
@@ -605,7 +684,7 @@ function createWindow() {
       reattachShortcuts();
     }
     // Toggling the window from a hotkey is the case in #46: the app reappears
-    // and the caret should be ready to type, not on the sidebar.
+    // and the caret should be ready to type, not on the main window's renderer.
     if (!settingsWindow) setTimeout(focusComposer, 250);
   });
 
@@ -634,7 +713,7 @@ function createWindow() {
 
       if (!settings.get('hasShownTrayNotification', false)) {
         const notification = new Notification({
-          title: 'SimplexityAI',
+          title: APP_DISPLAY_NAME,
           body: 'Application is now running in the system tray'
         });
         notification.show();
@@ -664,7 +743,8 @@ app.on('before-quit', () => {
 // playground.perplexity.ai and then to the generic www.perplexity.ai homepage),
 // so map any legacy value onto a real tab and persist the migration.
 function normalizeDefaultAI(value) {
-  if (isTabId(value)) return value;
+  // Settings only offers these two; tabs opened later are not a launch choice.
+  if (value === 'tab1' || value === 'tab2') return value;
 
   if (typeof value === 'string' && value.includes('labs.perplexity.ai')) {
     settings.set('defaultAI', DEFAULT_TAB_ID);
@@ -679,22 +759,111 @@ function normalizeDefaultAI(value) {
   return DEFAULT_TAB_ID;
 }
 
+// Restores the tab list, but only the tab being shown loads a page. The rest
+// get their BrowserView when first selected, so ten restored tabs do not mean
+// ten Perplexity renderers in memory.
 function loadDefaultAI() {
-  switchView(normalizeDefaultAI(settings.get('defaultAI', DEFAULT_TAB_ID)));
+  const saved = settings.get('restoreLastSession', true) === true ? settings.get('tabOrder', []) : [];
+  const restored = Array.isArray(saved) ? saved.filter((id) => typeof id === 'string' && TAB_ID_PATTERN.test(id)) : [];
+  // A search from the command line or a second instance can open a tab before
+  // this runs; keep it, and keep it in front.
+  const openedEarly = [...tabOrder];
+  tabOrder = [...new Set([...restored, ...openedEarly])];
+  const titles = settings.get('tabTitles', {});
+  tabOrder.forEach((id) => {
+    if (!tabMeta[id]) tabMeta[id] = { title: typeof titles[id] === 'string' ? titles[id] : '' };
+  });
+  persistTabs();
+  if (openedEarly.length) {
+    sendTabs();
+    return;
+  }
+
+  const preferred = normalizeDefaultAI(settings.get('defaultAI', DEFAULT_TAB_ID));
+  switchView(tabOrder.includes(preferred) || !tabOrder.length ? preferred : tabOrder[0]);
+}
+
+function nextTabId() {
+  let n = 1;
+  while (tabOrder.includes(`tab${n}`)) n++;
+  return `tab${n}`;
+}
+
+function selectTabOffset(offset) {
+  if (tabOrder.length < 2) return;
+  const index = tabOrder.indexOf(activeTabId);
+  switchView(tabOrder[(index + offset + tabOrder.length) % tabOrder.length]);
+}
+
+function persistTabs() {
+  settings.set('tabOrder', tabOrder);
+}
+
+function sendTabs() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send('tabs-changed', {
+    activeId: activeTabId,
+    // `asleep`: unloaded to save memory; the tab bar shows it dimmed with a moon.
+    tabs: tabOrder.map((id) => ({ id, ...tabMeta[id], asleep: id in discardedUrls }))
+  });
+}
+
+function updateTabMeta(tabId, changes) {
+  if (!tabMeta[tabId]) return;
+  Object.assign(tabMeta[tabId], changes);
+  if (typeof changes.title === 'string' && changes.title) {
+    const titles = settings.get('tabTitles', {});
+    if (titles[tabId] !== changes.title) {
+      titles[tabId] = changes.title;
+      settings.set('tabTitles', titles);
+    }
+  }
+  sendTabs();
+}
+
+// Closing the last tab closes the window instead, which hides to the tray or
+// quits per the existing closeToTray setting -- the same thing Safari does.
+function closeTab(tabId) {
+  const index = tabOrder.indexOf(tabId);
+  if (index === -1) return;
+  if (tabOrder.length === 1) {
+    mainWindow.close();
+    return;
+  }
+
+  tabOrder.splice(index, 1);
+  persistTabs();
+  for (const key of ['tabUrls', 'tabTitles']) {
+    const stored = settings.get(key, {});
+    delete stored[tabId];
+    settings.set(key, stored);
+  }
+
+  const view = views[tabId];
+  delete views[tabId];
+  delete tabMeta[tabId];
+  delete tabLastShown[tabId];
+  delete discardedUrls[tabId];
+  if (tabId === activeTabId) switchView(tabOrder[Math.min(index, tabOrder.length - 1)]);
+  if (view) {
+    mainWindow.removeBrowserView(view);
+    view.webContents.close();
+  }
+  sendTabs();
 }
 
 function adjustViewBounds() {
   if (currentView && mainWindow) {
     const bounds = mainWindow.getContentBounds();
-    const sidebarWidth = 60;
     const findBarHeight = findBarOpen ? 36 : 0;
+    const top = TAB_BAR_HEIGHT + findBarHeight;
 
-    const viewWidth = Math.max(bounds.width - sidebarWidth, 500);
-    const viewHeight = Math.max(bounds.height - findBarHeight, 400);
+    const viewWidth = Math.max(bounds.width, 500);
+    const viewHeight = Math.max(bounds.height - top, 400);
 
     currentView.setBounds({
-      x: sidebarWidth,
-      y: findBarHeight,
+      x: 0,
+      y: top,
       width: viewWidth,
       height: viewHeight,
     });
@@ -735,12 +904,12 @@ function restoredTabUrl(tabId) {
   return isRestorableUrl(stored[tabId]) ? stored[tabId] : tabHome(tabId);
 }
 
-// Issue #46: every focus() call in this file targets mainWindow, which is the
-// sidebar renderer, so opening the app parked the caret on the sidebar links
-// and Tab could not reach the page. Focus the BrowserView and put the caret in
-// the composer instead. Selectors are tried in order because Perplexity's
-// markup changes; if none match we still leave focus on the page rather than
-// the sidebar, which is already the improvement being asked for.
+// Issue #46: every focus() call in this file targets mainWindow, whose own
+// renderer only holds the tab bar and find bar, so opening the app parked the
+// caret there and Tab could not reach the page. Focus the BrowserView and put
+// the caret in the composer instead. Selectors are tried in order because
+// Perplexity's markup changes; if none match we still leave focus on the page,
+// which is already the improvement being asked for.
 function focusComposer() {
   const view = views[activeTabId] || currentView;
   if (!view || view.webContents.isDestroyed()) return;
@@ -770,12 +939,63 @@ function focusComposer() {
   `).catch(() => {});
 }
 
+// Styling layered onto Perplexity's page with insertCSS, so its React tree is
+// never edited: the app's glyph replaces Perplexity's logo in the sidebar, and
+// the Computer row is hidden unless Settings asks for it. The glyph is a mask
+// filled with the text colour, so it has no tile and follows light and dark.
+let appGlyphDataUrl = null;
+function pageCSS() {
+  appGlyphDataUrl = appGlyphDataUrl || nativeImage
+    .createFromPath(path.join(__dirname, 'assets', 'icons', 'png', 'glyph.png'))
+    .toDataURL();
+  const logo = 'nav[class*="group/sidebar"] a[href="/"]:not([aria-label])';
+  let css = `${logo} { position: relative; }
+    ${logo} > * { visibility: hidden; }
+    ${logo}::after { content: ""; position: absolute; inset: 0; background: currentColor;
+      -webkit-mask: url("${appGlyphDataUrl}") center / 24px no-repeat; pointer-events: none; }`;
+  if (!settings.get('showSidebarComputer', false)) {
+    css += '\nnav [class*="collapsible-sidebar-section"]:has(a[href^="/computer/tasks"]) { display: none !important; }';
+  }
+  return css;
+}
+
+async function applyPageCSS(contents) {
+  if (!contents || contents.isDestroyed()) return;
+  try {
+    if (contents.simplexCssKey) await contents.removeInsertedCSS(contents.simplexCssKey);
+    contents.simplexCssKey = await contents.insertCSS(pageCSS());
+  } catch (err) {
+    console.error('Could not style the Perplexity page:', err);
+  }
+}
+
+// Notifications are kept referenced until handled; one collected early never fires 'click'.
+const shownNotifications = new Set();
+function notifyAnswerReady(webContentsId) {
+  if (!settings.get('notifyAnswers', true) || !Notification.isSupported()) return;
+  const tabId = Object.keys(views).find((id) => !views[id].webContents.isDestroyed() && views[id].webContents.id === webContentsId);
+  if (!tabId || !mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.isFocused() && tabId === activeTabId) return;
+
+  const notification = new Notification({ title: (tabMeta[tabId] && tabMeta[tabId].title) || 'Perplexity', body: 'Answer ready' });
+  shownNotifications.add(notification);
+  const release = () => shownNotifications.delete(notification);
+  notification.on('click', () => {
+    release();
+    mainWindow.show();
+    mainWindow.focus();
+    switchView(tabId);
+  });
+  notification.on('close', release);
+  notification.show();
+}
+
 function isCtrlEnterToSendEnabled() {
   return settings.get('ctrlEnterToSend', false);
 }
 
-// Accepts a tab id ('tab1' / 'tab2'), 'refresh', 'search:<query>', or a plain
-// URL. Tab ids switch between the persistent tabs; anything that navigates
+// Accepts a tab id ('tab<n>'), 'refresh', 'search:<query>', or a plain URL.
+// A tab id selects that tab, opening it if it is not open yet; anything that navigates
 // (quick search, the donate link) is loaded into whichever tab is active, the
 // same way a browser opens a link in the current tab.
 function switchView(target) {
@@ -792,7 +1012,7 @@ function switchView(target) {
   let tabId;
   let navigateTo = null;
 
-  if (isTabId(target)) {
+  if (typeof target === 'string' && TAB_ID_PATTERN.test(target)) {
     tabId = target;
   } else if (typeof target === 'string' && target.startsWith('search:')) {
     const searchQuery = target.substring(7).trim();
@@ -807,14 +1027,24 @@ function switchView(target) {
     tabId = DEFAULT_TAB_ID;
   }
 
-  const url = navigateTo || restoredTabUrl(tabId);
+  const url = navigateTo || (isRestorableUrl(discardedUrls[tabId]) ? discardedUrls[tabId] : restoredTabUrl(tabId));
+  delete discardedUrls[tabId];
+  // Both the tab being left and the one being shown are "seen" now.
+  if (views[activeTabId]) tabLastShown[activeTabId] = Date.now();
+  tabLastShown[tabId] = Date.now();
 
   if (currentView) {
     mainWindow.removeBrowserView(currentView);
   }
 
-  // No eviction here any more. `views` holds exactly the fixed set of tabs, so
-  // the old maxCachedViews sweep could only ever destroy a live tab.
+  if (!tabOrder.includes(tabId)) {
+    tabOrder.push(tabId);
+    persistTabs();
+  }
+  if (!tabMeta[tabId]) tabMeta[tabId] = { title: '' };
+
+  // No eviction here. `views` holds only the open tabs; closeTab() is the one
+  // place a view is destroyed.
   if (views[tabId]) {
     currentView = views[tabId];
     activeTabId = tabId;
@@ -832,30 +1062,24 @@ function switchView(target) {
         spellcheck: true,
         webgl: true,
         enableWebSQL: false,
-        // Memory optimization settings
-        disableBlinkFeatures: 'Accelerated2dCanvas',
         enableBlinkFeatures: 'PaintHolding',
       },
     });
-    
-   
+
     if (currentView.webContents.setBackgroundThrottling) {
       currentView.webContents.setBackgroundThrottling(true);
     }
-    
-   
-    if (currentView.webContents.session && currentView.webContents.session.webRequest) {
-      currentView.webContents.session.webRequest.onBeforeSendHeaders((details, callback) => {
-        callback({cancel: false, requestHeaders: details.requestHeaders});
-      });
-    }
-    
+
     currentView.webContents.loadURL(url);
     views[tabId] = currentView;
     activeTabId = tabId;
 
     const trackedTabId = tabId;
-    const track = () => rememberTabUrl(trackedTabId, currentView.webContents.getURL());
+    // Events can still arrive from a view closeTab() just closed, and its id may
+    // already belong to a new tab, so each handler checks the view is still that tab's.
+    const isLive = () => views[trackedTabId] === viewRef;
+    // viewRef, not currentView: a background tab navigating must record its own URL.
+    const track = () => { if (isLive()) rememberTabUrl(trackedTabId, viewRef.webContents.getURL()); };
     currentView.webContents.on('did-navigate', track);
     currentView.webContents.on('did-navigate-in-page', track);
 
@@ -1022,11 +1246,27 @@ function switchView(target) {
       }
     });
 
-    currentView.webContents.on('did-finish-load', () => {
-      // The page owns focus from here; without this the sidebar keeps it.
-      if (views[activeTabId] === currentView) setTimeout(focusComposer, 150);
+    const setMeta = (changes) => { if (isLive()) updateTabMeta(trackedTabId, changes); };
+    // insertCSS lasts until the next full load, so apply it on every one.
+    viewRef.webContents.on('dom-ready', () => { viewRef.webContents.simplexCssKey = null; applyPageCSS(viewRef.webContents); });
+    viewRef.webContents.on('page-title-updated', (event, title) => setMeta({ title }));
+    viewRef.webContents.on('page-favicon-updated', (event, favicons) => {
+      // Perplexity's own pages carry the app's icon in the tab bar, like the Dock.
+      let host = '';
+      try { host = new URL(viewRef.webContents.getURL()).hostname; } catch {}
+      setMeta({ favicon: host === 'perplexity.ai' || host.endsWith('.perplexity.ai') ? 'app' : favicons[0] });
+    });
+    viewRef.webContents.on('did-fail-load', (event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+      // -3 is ERR_ABORTED: a navigation replaced by another, not a failure.
+      if (isMainFrame && errorCode !== -3) setMeta({ error: errorDescription || 'Failed to load' });
+    });
 
-      currentView.webContents.executeJavaScript(`
+    viewRef.webContents.on('did-finish-load', () => {
+      if (!isLive()) return;
+      // The page owns focus from here; without this the main window's renderer keeps it.
+      if (views[activeTabId] === viewRef) setTimeout(focusComposer, 150);
+
+      viewRef.webContents.executeJavaScript(`
         (function removeNagScreens() {
           const nagScreenSelectors = [
             'div.max-w-\\\\[400px\\\\].rounded-xl',
@@ -1046,33 +1286,44 @@ function switchView(target) {
 
     });
 
-    currentView.webContents.on('did-start-loading', () => {
-      mainWindow.webContents.send('page-loading', true);
-    });
-    
-    currentView.webContents.on('did-stop-loading', () => {
-      mainWindow.webContents.send('page-loading', false);
-    });
+    viewRef.webContents.on('did-start-loading', () => setMeta({ loading: true, error: null }));
+    viewRef.webContents.on('did-stop-loading', () => setMeta({ loading: false }));
   }
 
   mainWindow.addBrowserView(currentView);
   adjustViewBounds();
+  sendTabs();
   // Switching tabs should hand the caret to the page you switched to. A new
   // view has not loaded yet, so did-finish-load covers that case instead.
   if (!currentView.webContents.isLoading()) setTimeout(focusComposer, 50);
 }
 
+// Every tab holds a whole Perplexity renderer (about 200 MB). A tab left in the
+// background for DISCARD_AFTER_MS is unloaded and reloads its last URL when it is
+// selected again, like Chrome's Memory Saver. Perplexity keeps composer drafts
+// across reloads (seen while benchmarking), so what is lost is the scroll
+// position. Tabs still loading or playing audio are left alone; an answer
+// streaming over fetch does not count as loading, hence the long 30-minute wait. (An older version of this sweep destroyed every
+// background view because the timestamp it checked was never set; tabLastShown is
+// set on every switch.)
 function cleanupUnusedResources() {
-  if (global.gc) {
-    global.gc();
+  if (!settings.get('discardTabs', true)) return;
+  const now = Date.now();
+  let discardedAny = false;
+  for (const tabId of Object.keys(views)) {
+    const contents = views[tabId].webContents;
+    if (contents.isDestroyed()) {
+      delete views[tabId];
+      continue;
+    }
+    if (tabId === activeTabId || now - (tabLastShown[tabId] || now) < DISCARD_AFTER_MS) continue;
+    if (contents.isLoading() || contents.isCurrentlyAudible()) continue;
+    discardedUrls[tabId] = contents.getURL();
+    delete views[tabId];
+    contents.close();
+    discardedAny = true;
   }
-
-  // This used to destroy every view that was not the current one, gated on a
-  // `lastAccessTime` property that nothing ever assigned -- so the condition
-  // was always true and any backgrounded view was torn down on the next sweep.
-  // `views` now holds exactly the persistent tabs, whose whole purpose is to
-  // keep their state while backgrounded, so there is nothing here to reclaim.
-  // Idle cost is already bounded by backgroundThrottling on each view.
+  if (discardedAny) sendTabs();
 }
 
 function createTray() {
@@ -1080,10 +1331,11 @@ function createTray() {
 
   if (isWindows) {
     iconPath = path.join(__dirname, 'assets', 'icons', 'win', 'icon.ico');
+  } else if (isMac) {
+    // A template image: macOS tints it to match light and dark menu bars, and
+    // nativeImage picks up trayTemplate@2x.png beside it on Retina displays.
+    iconPath = path.join(__dirname, 'assets', 'icons', 'png', 'trayTemplate.png');
   } else {
-    // favicon.icns only carries an "ic10" (1024px) representation, which
-    // nativeImage cannot decode -- it returns an empty image and `new Tray()`
-    // throws, leaving macOS with no tray icon at all. Use the PNG instead.
     iconPath = path.join(__dirname, 'assets', 'icons', 'png', 'favicon.png');
   }
 
@@ -1093,22 +1345,10 @@ function createTray() {
   }
 
   try {
-    let trayIcon = iconPath;
-    if (isMac) {
-      // The source PNG is ~1058px; the macOS menu bar wants 16pt. Build it as a
-      // 32px bitmap tagged scaleFactor 2 so it stays sharp on Retina displays.
-      const source = nativeImage.createFromPath(iconPath);
-      trayIcon = nativeImage.createFromBuffer(
-        source.resize({ width: 32, height: 32 }).toPNG(),
-        { scaleFactor: 2 }
-      );
-      if (trayIcon.isEmpty()) {
-        trayIcon = source.resize({ width: 16, height: 16 });
-      }
-    }
+    const trayIcon = isMac ? nativeImage.createFromPath(iconPath) : iconPath;
 
     tray = new Tray(trayIcon);
-    tray.setToolTip('SimplexityAI');
+    tray.setToolTip(APP_DISPLAY_NAME);
 
     const contextMenu = Menu.buildFromTemplate([
       { 
@@ -1403,13 +1643,6 @@ ipcMain.on('close-settings', () => {
   }
 });
 
-ipcMain.on('switch-ai-tool', (event, target) => {
-  if (typeof target !== 'string') return;
-  if (isTabId(target) || target.startsWith('http') || target === 'refresh' || target.startsWith('search:')) {
-    switchView(target);
-  }
-});
-
 ipcMain.on('set-settings', (event, data) => {
   if (data.shortcuts) {
     shortcuts = data.shortcuts;
@@ -1437,6 +1670,11 @@ ipcMain.on('set-settings', (event, data) => {
     broadcastSidebarShortcuts();
   }
 
+  if (data.showSidebarComputer !== undefined && data.showSidebarComputer !== settings.get('showSidebarComputer', false)) {
+    settings.set('showSidebarComputer', data.showSidebarComputer === true);
+    Object.values(views).forEach((view) => applyPageCSS(view.webContents));
+  }
+
   if (data.closeToTray !== undefined) {
     settings.set('closeToTray', data.closeToTray);
   }
@@ -1445,14 +1683,22 @@ ipcMain.on('set-settings', (event, data) => {
     settings.set('ctrlEnterToSend', data.ctrlEnterToSend);
   }
 
+  if (data.notifyAnswers !== undefined) {
+    settings.set('notifyAnswers', data.notifyAnswers === true);
+  }
+
+  if (data.discardTabs !== undefined) {
+    settings.set('discardTabs', data.discardTabs === true);
+  }
+
   reattachShortcuts();
 });
 
 // The sidebar injector in preload_inject.js asks for this on every page load.
-ipcMain.handle('get-sidebar-shortcuts', () => settings.get('sidebarShortcuts', []));
+ipcMain.handle('get-sidebar-shortcuts', () => settings.get('sidebarShortcuts', DEFAULT_SIDEBAR_SHORTCUTS));
 
 function broadcastSidebarShortcuts() {
-  const ids = settings.get('sidebarShortcuts', []);
+  const ids = settings.get('sidebarShortcuts', DEFAULT_SIDEBAR_SHORTCUTS);
   Object.values(views).forEach((view) => {
     if (view && view.webContents && !view.webContents.isDestroyed()) {
       view.webContents.send('sidebar-shortcuts-changed', ids);
@@ -1468,9 +1714,12 @@ ipcMain.on('get-settings', (event) => {
     autoStartEnabled: autoStartEnabled,
     closeToTray: settings.get('closeToTray', true),
     restoreLastSession: settings.get('restoreLastSession', true),
-    sidebarShortcuts: settings.get('sidebarShortcuts', []),
+    sidebarShortcuts: settings.get('sidebarShortcuts', DEFAULT_SIDEBAR_SHORTCUTS),
+    showSidebarComputer: settings.get('showSidebarComputer', false),
     defaultShortcuts,
-    ctrlEnterToSend: settings.get('ctrlEnterToSend', false)
+    ctrlEnterToSend: settings.get('ctrlEnterToSend', false),
+    discardTabs: settings.get('discardTabs', true),
+    notifyAnswers: settings.get('notifyAnswers', true)
   };
   event.sender.send('settings', data);
 });
@@ -1483,8 +1732,6 @@ ipcMain.on('toggle-autostart', (event, enable) => {
 ipcMain.handle('get-autostart-status', () => {
   return autoStartEnabled;
 });
-
-ipcMain.handle('get-app-version', () => app.getVersion());
 
 ipcMain.on('open-external', (event, url) => {
   shell.openExternal(url);
@@ -1551,10 +1798,6 @@ ipcMain.on('mark-all-notifications-read', () => {
   notificationManager.markAllAsRead();
 });
 
-ipcMain.on('open-notification-panel', () => {
-  notificationManager.showNotificationPanel();
-});
-
 ipcMain.on('close-notification-panel', () => {
   if (notificationManager.panelWindow) {
     notificationManager.closePanelWindow();
@@ -1584,6 +1827,11 @@ ipcMain.on('perform-quick-search', (event, searchText) => {
     searchService.performSearch(searchText);
   }
 });
+
+// Tab bar
+ipcMain.on('tab-select', (event, tabId) => { if (isTabId(tabId)) switchView(tabId); });
+ipcMain.on('tab-close', (event, tabId) => { if (isTabId(tabId)) closeTab(tabId); });
+ipcMain.on('tab-new', () => switchView(nextTabId()));
 
 // Find bar state management
 ipcMain.on('find-bar-opened', () => {
@@ -1682,6 +1930,32 @@ ipcMain.on('close-settings', () => {
 configureAppForBetterPerformance();
 
 app.whenReady().then(() => {
+  app.setAboutPanelOptions({ applicationName: APP_DISPLAY_NAME });
+  // count.perplexity.ai is a beacon iframe that already fails on X-Frame-Options;
+  // blocking it skips the error page and the renderer it would spawn. Perplexity's
+  // service worker is NOT blocked: it delivers notifications (push ->
+  // showNotification) and serves cached assets, and blocking it broke both.
+  session.defaultSession.webRequest.onBeforeRequest(
+    { urls: ['*://count.perplexity.ai/*'] },
+    (_details, callback) => callback({ cancel: true })
+  );
+
+  // Electron has no Web Push service (subscribe fails with "push service not
+  // available"), so Perplexity's own notifications never arrive here. Instead,
+  // say so when an answer finishes while Simplex is not in front. The page closes
+  // the answer stream itself after the last message, so it ends as ERR_ABORTED
+  // (measured), not as a completed request: both endings count.
+  const answerStream = { urls: ['*://www.perplexity.ai/rest/sse/perplexity_ask*'] };
+  const answering = new Set();
+  session.defaultSession.webRequest.onResponseStarted(answerStream, (details) => {
+    if (details.statusCode === 200) answering.add(details.id);
+  });
+  const answerEnded = (details) => { if (answering.delete(details.id)) notifyAnswerReady(details.webContentsId); };
+  session.defaultSession.webRequest.onCompleted(answerStream, answerEnded);
+  session.defaultSession.webRequest.onErrorOccurred(answerStream, answerEnded);
+  // A packaged build takes its Dock icon from the bundle's .icns, which macOS can
+  // restyle; `npm start` runs the stock Electron.app, so show ours there too.
+  if (isMac && !app.isPackaged) app.dock.setIcon(path.join(__dirname, 'assets', 'icons', 'png', 'favicon.png'));
   lastUpdateCheck = settings.get('lastUpdateCheck', 0);
   
   if (!app.requestSingleInstanceLock()) {

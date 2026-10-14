@@ -3,8 +3,12 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('electronAPI', {
-  switchAITool: (url) => ipcRenderer.send('switch-ai-tool', url),
-  onPageLoading: (callback) => ipcRenderer.on('page-loading', (event, isLoading) => callback(isLoading)),
+  // Tab bar
+  onTabsChanged: (callback) => ipcRenderer.on('tabs-changed', (event, state) => callback(state)),
+  onFullScreenChanged: (callback) => ipcRenderer.on('fullscreen-changed', (event, isFullScreen) => callback(isFullScreen)),
+  selectTab: (tabId) => ipcRenderer.send('tab-select', tabId),
+  closeTab: (tabId) => ipcRenderer.send('tab-close', tabId),
+  newTab: () => ipcRenderer.send('tab-new'),
   openSettings: () => ipcRenderer.send('open-settings'),
   getShortcuts: () => ipcRenderer.send('get-shortcuts'),
   onShortcutsReceived: (callback) => ipcRenderer.on('shortcuts', (event, shortcuts) => callback(shortcuts)),
@@ -13,13 +17,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getSettings: () => ipcRenderer.send('get-settings'),
   onSettingsReceived: (callback) => ipcRenderer.on('settings', (event, data) => callback(data)),
   setSettings: (data) => ipcRenderer.send('set-settings', data),  
-  getAppVersion: () => ipcRenderer.invoke('get-app-version'),
   platform: process.platform,
-  
-  openNotificationPanel: () => ipcRenderer.send('open-notification-panel'),
-  onNotificationBadgeUpdate: (callback) => 
-    ipcRenderer.on('notification-badge-update', (event, count) => callback(count)),
-    
+
   performQuickSearch: (searchText) => ipcRenderer.send('perform-quick-search', searchText),
   installContextMenu: () => ipcRenderer.send('install-context-menu'),
   

@@ -15,7 +15,18 @@
       "WebFetch(domain:documentation.ubuntu.com)",
       "WebFetch(domain:github.com)",
       "WebFetch(domain:www.electron.build)",
-      "Bash(git check-ignore:*)"
+      "Bash(git check-ignore:*)",
+      "Bash(npm rebuild *)",
+      "Bash(node -e \"console.log\\(require\\('electron'\\)\\)\")",
+      "Bash(node install.js)",
+      "Bash(cat path.txt)",
+      "Read(//Users/x/Documents/**)",
+      "Bash(./node_modules/.bin/electron --version)",
+      "Bash(sed -n 1,60p install.js)",
+      "Bash(echo \"exit=$?\")",
+      "Bash(env)",
+      "Bash(/bin/ls -la dist)",
+      "Bash(/bin/ls ~/Library/Caches/electron)"
     ]
   }
 }

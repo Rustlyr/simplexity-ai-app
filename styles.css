@@ -1,109 +1,359 @@
 /* styles.css */
 
+/* Tokens. The tab bar follows macOS 26 Safari: tabs on the window's own
+   translucent material, the selected one raised as a glass capsule. */
+:root {
+  --tabbar-height: 44px; /* must match TAB_BAR_HEIGHT in main.js */
+  --traffic-lights-inset: 86px;
+  --tab-height: 30px;
+  --tab-radius: 10px;
+  --tab-min-width: 96px;
+  --tab-max-width: 240px;
+  --icon-size: 16px;
+  --space-xs: 4px;
+  --space-sm: 6px;
+  --space-md: 10px;
+
+  --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "Noto Sans Thai", system-ui, sans-serif;
+  --font-size-tab: 12.5px;
+
+  --color-window: #222324;
+  --color-bar-opaque: #1d1e1f;
+  --color-text: rgba(255, 255, 255, 0.92);
+  --color-text-muted: rgba(255, 255, 255, 0.6);
+  --color-hover: rgba(255, 255, 255, 0.07);
+  --color-pressed: rgba(255, 255, 255, 0.11);
+  --color-glass: rgba(255, 255, 255, 0.13);
+  --color-glass-edge: rgba(255, 255, 255, 0.16);
+  --color-glass-highlight: rgba(255, 255, 255, 0.28);
+  --color-warning: #ffb340;
+  --color-focus: #0a84ff;
+  --shadow-glass: 0 1px 2px rgba(0, 0, 0, 0.28), 0 6px 16px rgba(0, 0, 0, 0.18);
+
+  --duration-fast: 150ms;
+  --duration-spin: 800ms;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --color-window: #f5f5f7;
+    --color-bar-opaque: #e8e8ea;
+    --color-text: rgba(0, 0, 0, 0.85);
+    --color-text-muted: rgba(0, 0, 0, 0.6);
+    --color-hover: rgba(0, 0, 0, 0.05);
+    --color-pressed: rgba(0, 0, 0, 0.09);
+    --color-glass: rgba(255, 255, 255, 0.72);
+    --color-glass-edge: rgba(0, 0, 0, 0.08);
+    --color-glass-highlight: rgba(255, 255, 255, 0.9);
+    --color-warning: #c45f00;
+    --color-focus: #007aff;
+    --shadow-glass: 0 1px 2px rgba(0, 0, 0, 0.1), 0 6px 16px rgba(0, 0, 0, 0.08);
+  }
+}
+
 * {
-    box-sizing: border-box;
-    margin: 0;
-    padding: 0;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  height: 100%;
+  font-family: var(--font-ui);
+  background-color: var(--color-window);
+  color: var(--color-text);
+  overflow: hidden;
+}
+
+/* macOS draws vibrancy behind the window; a transparent page lets it show. */
+body.platform-mac {
+  background-color: transparent;
+}
+
+a {
+  text-decoration: none;
+  color: inherit;
+}
+
+img {
+  display: block;
+}
+
+#container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+#content {
+  flex-grow: 1;
+  position: relative;
+}
+
+#webview-container {
+  width: 100%;
+  height: 100%;
+  position: relative;
+}
+
+/* Tab bar */
+#tabbar {
+  flex: none;
+  height: var(--tabbar-height);
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding-inline: var(--space-sm);
+  background-color: var(--color-bar-opaque);
+  -webkit-app-region: drag;
+  user-select: none;
+}
+
+body.platform-mac #tabbar {
+  background-color: transparent;
+  padding-inline-start: var(--traffic-lights-inset);
+}
+
+body.platform-mac.fullscreen #tabbar {
+  padding-inline-start: var(--space-sm);
+}
+
+#tabs {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+#tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.tab {
+  position: relative;
+  flex: 0 1 var(--tab-max-width);
+  min-width: var(--tab-min-width);
+  height: var(--tab-height);
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding-inline: var(--space-md);
+  border-radius: var(--tab-radius);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-tab);
+  font-weight: 500;
+  cursor: default;
+  outline: none;
+  -webkit-app-region: no-drag;
+  transition:
+    background-color var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out),
+    box-shadow var(--duration-fast) var(--ease-out);
+  animation: tab-in var(--duration-fast) var(--ease-out);
+}
+
+.tab:hover {
+  background-color: var(--color-hover);
+}
+
+.tab:active {
+  background-color: var(--color-pressed);
+}
+
+/* The selected tab is the one raised piece of glass: a light fill, a
+   hairline edge, a lit top edge and a soft shadow underneath. */
+.tab.active {
+  color: var(--color-text);
+  background-color: var(--color-glass);
+  box-shadow:
+    inset 0 0 0 0.5px var(--color-glass-edge),
+    inset 0 0.5px 0 var(--color-glass-highlight),
+    var(--shadow-glass);
+  backdrop-filter: blur(20px) saturate(1.8);
+}
+
+.tab:focus-visible {
+  box-shadow: 0 0 0 2px var(--color-focus);
+}
+
+.tab-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.tab-icon {
+  position: relative;
+  flex: none;
+  width: var(--icon-size);
+  height: var(--icon-size);
+  display: grid;
+  place-items: center;
+}
+
+.tab-icon > * {
+  grid-area: 1 / 1;
+  display: none;
+}
+
+.tab-favicon[src$="glyph.png"] {
+  /* The app glyph is black on transparent: white on the dark tab bar. */
+  filter: invert(1);
+}
+
+@media (prefers-color-scheme: light) {
+  .tab-favicon[src$="glyph.png"] { filter: none; }
+}
+
+.tab-favicon {
+  width: var(--icon-size);
+  height: var(--icon-size);
+  border-radius: 3px;
+}
+
+.tab-glyph {
+  width: var(--icon-size);
+  height: var(--icon-size);
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.25;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* One icon at a time: loading, then error, then asleep, then the favicon, then a page glyph. */
+.tab:not(.loading):not(.error):not(.asleep):not(.has-favicon) .tab-glyph-page,
+.tab.has-favicon:not(.loading):not(.error):not(.asleep) .tab-favicon,
+.tab.error:not(.loading) .tab-glyph-error,
+.tab.asleep:not(.loading):not(.error) .tab-glyph-asleep,
+.tab.loading .tab-spinner {
+  display: block;
+}
+
+/* Unloaded to save memory: dimmed until it is opened again. */
+.tab.asleep .tab-title,
+.tab.asleep .tab-glyph-asleep {
+  opacity: 0.85;
+}
+
+.tab.error .tab-glyph-error {
+  color: var(--color-warning);
+}
+
+.tab-spinner {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1.5px solid var(--color-hover);
+  border-top-color: currentColor;
+  animation: spin var(--duration-spin) linear infinite;
+}
+
+/* Close sits over the icon and appears on hover, as in Safari. The 24px box
+   is the hit area; the visible circle is drawn inside it. */
+.tab-close {
+  position: absolute;
+  inset-block-start: calc((var(--tab-height) - 24px) / 2);
+  inset-inline-start: calc(var(--space-md) - 4px);
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  color: var(--color-text);
+  opacity: 0;
+  -webkit-app-region: no-drag;
+  transition: opacity var(--duration-fast) var(--ease-out);
+}
+
+.tab-close svg {
+  width: 16px;
+  height: 16px;
+  padding: 2px;
+  border-radius: 50%;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+}
+
+.tab-close:hover svg {
+  background-color: var(--color-pressed);
+}
+
+.tab:hover .tab-close {
+  opacity: 1;
+}
+
+.tab:hover .tab-icon {
+  visibility: hidden;
+}
+
+#new-tab {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 8px;
+  background: none;
+  color: var(--color-text-muted);
+  -webkit-app-region: no-drag;
+  transition: background-color var(--duration-fast) var(--ease-out), color var(--duration-fast) var(--ease-out);
+}
+
+#new-tab svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+}
+
+#new-tab:hover {
+  background-color: var(--color-hover);
+  color: var(--color-text);
+}
+
+#new-tab:active {
+  background-color: var(--color-pressed);
+}
+
+#new-tab:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 1px;
+}
+
+@keyframes tab-in {
+  from { opacity: 0; transform: scale(0.96); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* New-tab entrance is decoration; the spinner is a status, so it stays but stops turning. */
+@media (prefers-reduced-motion: reduce) {
+  .tab, .tab-close, #new-tab {
+    animation: none;
+    transition: none;
   }
-  
-  html, body {
-    height: 100%;
-    font-family: Arial, sans-serif;
-    background-color: #222324; 
-    color: #ffffff;
-    overflow: hidden;
+  .tab-spinner {
+    animation: none;
   }
-  
-  a {
-    text-decoration: none;
-    color: inherit;
-  }
-  
-  img {
-    display: block;
-  }
-  
-  #container {
-    display: flex;
-    height: 100%;
-  }
-  
-  #sidebar {
-    width: 60px;
-    background-color: #2B2C2D; 
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    padding-top: 10px;
-    padding-bottom: 10px;
-  }
-  
-  #sidebar .menu-item {
-    margin-bottom: 20px;
-    cursor: pointer;
-    transition: transform 0.2s;
-  }
-  
-  #sidebar .menu-item:hover {
-    transform: scale(1.05);
-  }
-  
-  #sidebar .menu-item img {
-    width: 28px;
-    height: 28px;
-  }
-  
-  .spacer {
-    flex-grow: 1;
-  }
-  
-  .version-display {
-    color: #bbb;
-    font-size: 12px;
-    margin-top: 10px;
-    text-align: center;
-  }
-  
-  #content {
-    flex-grow: 1;
-    position: relative;
-  }
-  
-  #webview-container {
-    width: 100%;
-    height: 100%;
-    position: relative;
-  }
-  
-  #loading {
-    position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background-color: rgba(43, 43, 43, 0.85);
-    display: none;
-    justify-content: center;
-    align-items: center;
-  }
-  
-  #loading.show {
-    display: flex;
-  }
-  
-  .spinner {
-    border: 6px solid #4c4c4c;
-    border-top: 6px solid #7a7a7a;
-    border-radius: 50%;
-    width: 50px;
-    height: 50px;
-    animation: spin 1s linear infinite;
-  }
-  
-  @keyframes spin {
-    0% { transform: rotate(0deg); }
-    100% { transform: rotate(360deg); }
-  }
+}
 
 ::-webkit-scrollbar-thumb {
   background: #4b5563;
@@ -114,25 +364,6 @@
   width: 8px;
 }
 
-
-.notification-icon-container {
-  position: relative;
-}
-
-.notification-badge {
-  position: absolute;
-  top: -5px;
-  right: -5px;
-  background-color: #1E4D53;
-  color: white;
-  border-radius: 50%;
-  font-size: 10px;
-  width: 16px;
-  height: 16px;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-}
 
 /* Find Bar */
 #find-bar {

@@ -107,7 +107,7 @@ your data stays with P AI
 ### 🎨 **Modern UI**
 - **Custom Branding** — Unique SimplexityAI design (bright blue #5BEBFF theme)
 - **Dark Mode Native** — Respects P's dark theme
-- **Minimal Sidebar** — Clean, distraction-free interface
+- **Full-Width Page** — No app sidebar; Perplexity fills the window
 - **Smooth Animations** — Polished user experience
 
 ---
@@ -287,7 +287,7 @@ Launch SimplexityAI automatically when your computer boots
 
 ## 🛠️ Settings & Customization
 
-Access settings by clicking the ⚙️ icon in the sidebar.
+Open settings from the app menu: **Simplexity AI → Settings…** (Cmd+,) on macOS, **File → Settings…** (Ctrl+,) on Windows and Linux.
 
 ### Available Settings:
 
@@ -469,7 +469,7 @@ See [LICENSE](LICENSE) for full details.
 <details>
 <summary><strong>Q: Can I customize the keyboard shortcuts?</strong></summary>
 <br>
-<b>A:</b> Yes! All keyboard shortcuts are fully customizable in the Settings panel. Click the ⚙️ icon in the sidebar to access settings.
+<b>A:</b> Yes! All keyboard shortcuts are fully customizable in the Settings panel. Open them with Cmd+, (macOS) or Ctrl+, (Windows/Linux).
 </details>
 
 <details>

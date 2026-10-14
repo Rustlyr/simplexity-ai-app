@@ -19,18 +19,17 @@
   "license": "GPL-3.0-only",
   "dependencies": {
     "dompurify": "^3.4.13",
-    "electron-clipboard-extended": "^1.1.1",
     "electron-store": "^7.0.3",
     "electron-window-state": "^5.0.3",
     "marked": "^15.0.11"
   },
   "devDependencies": {
-    "electron": "^33.0.2",
-    "electron-builder": "^25.1.8"
+    "electron": "^44.7.0",
+    "electron-builder": "^26.15.3"
   },
   "build": {
     "appId": "com.inulute.simplexityai",
-    "productName": "Simplexity AI",
+    "productName": "Simplex",
     "directories": {
       "output": "release-builds"
     },
@@ -45,7 +44,8 @@
       "!**/.{idea,git,cache,github,vscode}",
       "!**/{.DS_Store,.git,.gitignore,.npmignore}",
       "!**/{*.log,*.md}",
-      "!**/package-lock.json"
+      "!**/package-lock.json",
+      "!{release-builds,scripts,.claude,.impeccable,assets/icons/source}/**"
     ],
     "protocols": [
       {
@@ -84,7 +84,7 @@
       "oneClick": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Simplexity AI",
+      "shortcutName": "Simplex",
       "runAfterFinish": true,
       "artifactName": "${productName}-Setup-${version}.${ext}",
       "differentialPackage": false,
@@ -102,7 +102,9 @@
       "category": "Utility",
       "synopsis": "Simplexity AI - Unofficial Perplexity AI Desktop App",
       "desktop": {
-        "StartupWMClass": "simplexity-ai-app"
+        "entry": {
+          "StartupWMClass": "simplexity-ai-app"
+        }
       },
       "artifactName": "${productName}-${version}.${ext}"
     },

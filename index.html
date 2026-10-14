@@ -3,50 +3,22 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Simplexity AI</title>
+  <title>Simplex</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <div id="container">
-    <!-- Sidebar -->
-    <nav id="sidebar">
-
-<a href="#" class="menu-item" id="notification-button">
-  <div class="notification-icon-container">
-    <img src="./assets/icons/svg/notification-icon.svg" alt="Notifications" title="Notifications"/>
-    <div id="notification-badge" class="notification-badge" style="display:none;">0</div>
-  </div>
-</a>
-<div class="sidebar-separator" style="background-color: white; height: 1px; margin: 8px 0;"></div>
-      <a href="#" class="menu-item" id="tab1-button" onclick="window.electronAPI.switchAITool('tab1')">
-        <img src="./assets/icons/svg/perplexity-ai-icon.svg" alt="AI Search" title="AI Search"/>
-      </a>
-      <a href="#" class="menu-item" id="tab2-button" onclick="window.electronAPI.switchAITool('tab2')">
-        <img src="./assets/icons/svg/ai-icon.svg" alt="Second Tab" title="Second Tab (separate Perplexity workspace)"/>
-      </a>
-      <a href="#" class="menu-item" onclick="window.electronAPI.switchAITool('refresh')">
-        <img src="./assets/icons/svg/refresh-icon.svg" alt="Refresh" title="Refresh"/>
-      </a>
-      <!-- Spacer -->
-      <div class="spacer"></div>
-      <!-- Donate Button -->
-      <a href="#" class="menu-item" onclick="window.electronAPI.switchAITool('https://donate.inulute.com')">
-        <img src="./assets/icons/svg/coffee-icon.svg" alt="Donate" title="Buy me a Coffee"/>
-      </a>
-      <!-- Settings Button -->
-      <a href="#" class="menu-item" onclick="window.electronAPI.openSettings()">
-        <img src="./assets/icons/svg/settings-icon.svg" alt="Settings" title="Settings"/>
-      </a>
-      <!-- Version Display -->
-      <div class="version-display">v{version}</div>
-    </nav>
+    <!-- Tab bar: on macOS it is the title bar, beside the traffic lights -->
+    <header id="tabbar">
+      <div id="tabs" role="tablist" aria-label="Tabs"></div>
+      <button id="new-tab" type="button" aria-label="New tab" title="New Tab">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg>
+      </button>
+    </header>
     <!-- Content -->
     <div id="content">
       <div id="webview-container">
         <!-- BrowserView content will be rendered here -->
-      </div>
-      <div id="loading">
-        <div class="spinner"></div>
       </div>
       <!-- Find Bar -->
       <div id="find-bar">

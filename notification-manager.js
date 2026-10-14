@@ -1,5 +1,5 @@
 // notification-manager.js
-const { BrowserWindow, net, ipcMain } = require('electron');
+const { app, BrowserWindow, net, ipcMain } = require('electron');
 const path = require('path');
 const marked = require('marked');
 const Store = require('electron-store');
@@ -452,11 +452,9 @@ class NotificationManager {
     this.store.set('notifications', this.notifications);
   }
 
+  // The sidebar badge is gone with the sidebar; the Dock badge carries the count now.
   updateBadge() {
-    if (this.mainWindow && !this.mainWindow.isDestroyed()) {
-      this.mainWindow.webContents.send('notification-badge-update', 
-        this.notifications.unreadCount);
-    }
+    app.setBadgeCount(this.notifications.unreadCount);
   }
 
   async showNotificationPanel() {

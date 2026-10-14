@@ -1,0 +1,17 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "broken-image",
+        "value": "*",
+        "files": [
+          "src/js/renderer/renderer.js"
+        ],
+        "createdAt": "2026-10-09T08:45:00.442Z",
+        "reason": "Claude: favicon img in the tab template gets its https src at runtime and is display:none until .has-favicon, so no broken box renders"
+      }
+    ]
+  }
+}

@@ -7,206 +7,146 @@
 </head>
 <body>
   <div id="settings-container">
-    <div class="settings-header">
-      <img src="./assets/icons/svg/settings-icon.svg" alt="Settings Icon" class="settings-icon">
-      <h2>Settings</h2>
-      <button class="close-button" onclick="closeSettings()">&#x2715;</button>
-    </div>
+    <header class="settings-header">
+      <h1>Settings</h1>
+      <button type="button" class="done-button" onclick="closeSettings()">Done</button>
+    </header>
+
     <form id="settings-form">
-      <div class="settings-section">
-        <h3>General</h3>
-        <div class="setting-item">
-          <label for="defaultAI">
-            <img src="./assets/icons/svg/ai-icon.svg" alt="Default AI">
-            Default AI Site:
-          </label>
-          <select id="defaultAI">
-            <option value="tab1">AI Search</option>
-            <option value="tab2">Second Tab</option>
-          </select>
+      <section class="group">
+        <h2>General</h2>
+        <div class="rows">
+          <div class="row">
+            <label for="defaultAI" class="row-text"><span class="row-label">Open on launch</span></label>
+            <select id="defaultAI">
+              <option value="tab1">First tab</option>
+              <option value="tab2">Second tab</option>
+            </select>
+          </div>
+          <div class="row">
+            <label for="toggle-autostart" class="row-text">
+              <span class="row-label">Open at login</span>
+              <span class="row-hint">Start Simplex when you sign in.</span>
+            </label>
+            <input type="checkbox" id="toggle-autostart" class="switch" role="switch">
+          </div>
+          <div class="row">
+            <label for="toggle-restoreLastSession" class="row-text">
+              <span class="row-label">Reopen tabs from last time</span>
+              <span class="row-hint">Off: every launch starts with one tab.</span>
+            </label>
+            <input type="checkbox" id="toggle-restoreLastSession" class="switch" role="switch" checked>
+          </div>
+          <div class="row">
+            <label for="toggle-closeToTray" class="row-text">
+              <span class="row-label">Keep running when the window closes</span>
+              <span class="row-hint">Reopening is instant; the page stays loaded.</span>
+            </label>
+            <input type="checkbox" id="toggle-closeToTray" class="switch" role="switch" checked>
+          </div>
+          <div class="row">
+            <label for="toggle-discardTabs" class="row-text">
+              <span class="row-label">Put unused tabs to sleep</span>
+              <span class="row-hint">Tabs idle for 30 minutes free their memory.</span>
+            </label>
+            <input type="checkbox" id="toggle-discardTabs" class="switch" role="switch" checked>
+          </div>
+          <div class="row">
+            <label for="toggle-notifyAnswers" class="row-text">
+              <span class="row-label">Notify when an answer is ready</span>
+              <span class="row-hint">Only while Simplex is in the background.</span>
+            </label>
+            <input type="checkbox" id="toggle-notifyAnswers" class="switch" role="switch" checked>
+          </div>
+          <div class="row">
+            <label for="toggle-ctrlEnterToSend" class="row-text">
+              <span class="row-label" id="send-label">Send with ⌘↩</span>
+              <span class="row-hint">Return adds a new line instead.</span>
+            </label>
+            <input type="checkbox" id="toggle-ctrlEnterToSend" class="switch" role="switch">
+          </div>
         </div>
-      </div>
- 
-      <div class="setting-item">
-        <label for="autostart">
-          <img src="./assets/icons/svg/autostart-icon.svg" alt="Autostart">
-          Autostart:
-        </label>
-        <label class="toggle-switch">
-          <input type="checkbox" id="toggle-autostart" class="toggle-checkbox">
-          <span class="toggle-slider"></span>
-        </label>
-      </div>
+      </section>
 
-      <div class="sidebar-shortcuts-item">
-        <label>
-          <img src="./assets/icons/svg/perplexity-ai-icon.svg" alt="">
-          Show in Perplexity's sidebar:
-        </label>
-        <p class="sidebar-shortcuts-hint">Adds shortcuts to Perplexity's own left sidebar. Choose any; leave all unticked to keep it unchanged.</p>
-        <div class="sidebar-shortcuts-grid" id="sidebarShortcuts">
-          <label class="sidebar-shortcut-chip"><input type="checkbox" class="sidebar-shortcut" value="discover">Discover</label>
-          <label class="sidebar-shortcut-chip"><input type="checkbox" class="sidebar-shortcut" value="finance">Finance</label>
-          <label class="sidebar-shortcut-chip"><input type="checkbox" class="sidebar-shortcut" value="cfo">Personal CFO</label>
-          <label class="sidebar-shortcut-chip"><input type="checkbox" class="sidebar-shortcut" value="health">Health</label>
-          <label class="sidebar-shortcut-chip"><input type="checkbox" class="sidebar-shortcut" value="academic">Academic</label>
-          <label class="sidebar-shortcut-chip"><input type="checkbox" class="sidebar-shortcut" value="patents">Patents</label>
+      <section class="group">
+        <h2 id="sidebar-heading">Add to Perplexity's sidebar</h2>
+        <div class="chips" id="sidebarShortcuts" role="group" aria-labelledby="sidebar-heading">
+          <label class="chip"><input type="checkbox" class="sidebar-shortcut" value="discover">Discover</label>
+          <label class="chip"><input type="checkbox" class="sidebar-shortcut" value="finance">Finance</label>
+          <label class="chip"><input type="checkbox" class="sidebar-shortcut" value="cfo">Personal CFO</label>
+          <label class="chip"><input type="checkbox" class="sidebar-shortcut" value="health">Health</label>
+          <label class="chip"><input type="checkbox" class="sidebar-shortcut" value="academic">Academic</label>
+          <label class="chip"><input type="checkbox" class="sidebar-shortcut" value="patents">Patents</label>
         </div>
-      </div>
+        <div class="rows">
+          <div class="row">
+            <label for="toggle-showSidebarComputer" class="row-text"><span class="row-label">Show Computer</span></label>
+            <input type="checkbox" id="toggle-showSidebarComputer" class="switch" role="switch">
+          </div>
+        </div>
+      </section>
 
-      <div class="setting-item">
-        <label for="restoreLastSession">
-          <img src="./assets/icons/svg/revert-icon.svg" alt="Restore Last Session">
-          Reopen where I left off:
-        </label>
-        <label class="toggle-switch">
-          <input type="checkbox" id="toggle-restoreLastSession" class="toggle-checkbox" checked>
-          <span class="toggle-slider"></span>
-        </label>
-      </div>
+      <section class="group">
+        <h2>Global shortcuts</h2>
+        <div class="rows">
+          <div class="row shortcut-item">
+            <label for="shortcut-perplexityAI" class="row-text"><span class="row-label">First tab</span></label>
+            <input type="text" id="shortcut-perplexityAI" class="shortcut-input" readonly placeholder="Press keys">
+            <input type="checkbox" id="toggle-perplexityAI" class="switch shortcut-toggle" role="switch" aria-label="Enable First tab shortcut">
+          </div>
+          <div class="row shortcut-item">
+            <label for="shortcut-secondTab" class="row-text"><span class="row-label">Second tab</span></label>
+            <input type="text" id="shortcut-secondTab" class="shortcut-input" readonly placeholder="Press keys">
+            <input type="checkbox" id="toggle-secondTab" class="switch shortcut-toggle" role="switch" aria-label="Enable Second tab shortcut">
+          </div>
+          <div class="row shortcut-item">
+            <label for="shortcut-sendToTray" class="row-text"><span class="row-label">Hide Simplex</span></label>
+            <input type="text" id="shortcut-sendToTray" class="shortcut-input" readonly placeholder="Press keys">
+            <input type="checkbox" id="toggle-sendToTray" class="switch shortcut-toggle" role="switch" aria-label="Enable Hide Simplex shortcut">
+          </div>
+          <div class="row shortcut-item">
+            <label for="shortcut-restoreApp" class="row-text"><span class="row-label">Show Simplex</span></label>
+            <input type="text" id="shortcut-restoreApp" class="shortcut-input" readonly placeholder="Press keys">
+            <input type="checkbox" id="toggle-restoreApp" class="switch shortcut-toggle" role="switch" aria-label="Enable Show Simplex shortcut">
+          </div>
+          <div class="row shortcut-item">
+            <label for="shortcut-quickSearch" class="row-text"><span class="row-label">Quick search</span></label>
+            <input type="text" id="shortcut-quickSearch" class="shortcut-input" readonly placeholder="Press keys">
+            <input type="checkbox" id="toggle-quickSearch" class="switch shortcut-toggle" role="switch" aria-label="Enable Quick search shortcut">
+          </div>
+          <div class="row shortcut-item">
+            <label for="shortcut-customPrefixSearch" class="row-text"><span class="row-label">Ask about selected text</span></label>
+            <input type="text" id="shortcut-customPrefixSearch" class="shortcut-input" readonly placeholder="Press keys">
+            <input type="checkbox" id="toggle-customPrefixSearch" class="switch shortcut-toggle" role="switch" aria-label="Enable Ask about selected text shortcut">
+          </div>
+        </div>
+      </section>
 
-      <div class="setting-item">
-        <label for="closeToTray">
-          <img src="./assets/icons/svg/tray-icon.svg" alt="Close to Tray">
-          Close to Tray:
-        </label>
-        <label class="toggle-switch">
-          <input type="checkbox" id="toggle-closeToTray" class="toggle-checkbox" checked>
-          <span class="toggle-slider"></span>
-        </label>
-      </div>
-
-      <div class="setting-item">
-        <label for="ctrlEnterToSend">
-          <img src="./assets/icons/svg/ai-icon.svg" alt="Ctrl+Enter to Send">
-          Ctrl+Enter to Send:
-        </label>
-        <label class="toggle-switch">
-          <input type="checkbox" id="toggle-ctrlEnterToSend" class="toggle-checkbox">
-          <span class="toggle-slider"></span>
-        </label>
-      </div>
-
-      <div class="settings-section">
-        <h3>Shortcuts</h3>
-        <p class="section-description">Enable and customize the ones you want to use.</p>
-        
-        <div class="shortcut-item">
-          <label>
-            <img src="./assets/icons/svg/perplexity-ai-icon.svg" alt="AI Search">
-            AI Search:
-          </label>
-          <input type="text" id="shortcut-perplexityAI" class="shortcut-input" readonly placeholder="Press keys..." required>
-          <label class="toggle-switch">
-            <input type="checkbox" id="toggle-perplexityAI" class="toggle-checkbox">
-            <span class="toggle-slider"></span>
-          </label>
-        </div>
-
-        <div class="shortcut-item">
-          <label>
-            <img src="./assets/icons/svg/ai-icon.svg" alt="Second Tab">
-            Second Tab:
-          </label>
-          <input type="text" id="shortcut-secondTab" class="shortcut-input" readonly placeholder="Press keys..." required>
-          <label class="toggle-switch">
-            <input type="checkbox" id="toggle-secondTab" class="toggle-checkbox">
-            <span class="toggle-slider"></span>
-          </label>
-        </div>
-        
-        <div class="shortcut-item">
-          <label>
-            <img src="./assets/icons/svg/tray-icon.svg" alt="Send to Tray">
-            Send to Tray:
-          </label>
-          <input type="text" id="shortcut-sendToTray" class="shortcut-input" readonly placeholder="Press keys..." required>
-          <label class="toggle-switch">
-            <input type="checkbox" id="toggle-sendToTray" class="toggle-checkbox">
-            <span class="toggle-slider"></span>
-          </label>
-        </div>
-        
-        <div class="shortcut-item">
-          <label>
-            <img src="./assets/icons/svg/restore-icon.svg" alt="Restore App">
-            Restore App:
-          </label>
-          <input type="text" id="shortcut-restoreApp" class="shortcut-input" readonly placeholder="Press keys..." required>
-          <label class="toggle-switch">
-            <input type="checkbox" id="toggle-restoreApp" class="toggle-checkbox">
-            <span class="toggle-slider"></span>
-          </label>
-        </div>
-        
-        <div class="shortcut-item">
-          <label>
-            <img src="./assets/icons/svg/search-icon.svg" alt="Quick Search">
-            Quick Search:
-          </label>
-          <input type="text" id="shortcut-quickSearch" class="shortcut-input" readonly placeholder="Press keys..." required>
-          <label class="toggle-switch">
-            <input type="checkbox" id="toggle-quickSearch" class="toggle-checkbox">
-            <span class="toggle-slider"></span>
-          </label>
-        </div>
-        
-        <div class="shortcut-item">
-          <label>
-            <img src="./assets/icons/svg/custom-prefix-icon.svg" alt="Custom Prefix">
-            Custom Prefix:
-          </label>
-          <input type="text" id="shortcut-customPrefixSearch" class="shortcut-input" readonly placeholder="Press keys..." required>
-          <label class="toggle-switch">
-            <input type="checkbox" id="toggle-customPrefixSearch" class="toggle-checkbox">
-            <span class="toggle-slider"></span>
-          </label>
-        </div>
-        
-        <button type="button" id="show-instructions-button" class="instructions-button">
-          View Shortcut Instructions
-        </button>
-      </div>
-
-      <div class="button-container">
-        <button type="button" id="restore-button" class="restore-button" title="Restore Defaults">
-          <img src="./assets/icons/svg/revert-icon.svg" alt="Restore Defaults Icon">
-        </button>
-        <button type="submit" class="save-button">Save Settings</button>
-      </div>
+      <footer class="settings-footer">
+        <span>Changes apply right away.</span>
+        <button type="button" id="restore-button" class="link-button">Restore default shortcuts</button>
+        <button type="button" id="show-instructions-button" class="link-button instructions-button">Shortcut help</button>
+      </footer>
     </form>
   </div>
 
   <script src="./src/js/renderer/renderer.js"></script>
   <script>
     document.addEventListener('DOMContentLoaded', () => {
-      const showInstructionsButton = document.getElementById('show-instructions-button');
-      
       // pplx.inulute.com/shortcuts redirects to the repository root rather than
       // to anything that documents shortcuts; link straight at the README
       // section that does. %EF%B8%8F is the variation selector in GitHub's own
       // anchor for the "Keyboard Shortcuts" heading.
       const documentationUrl = 'https://github.com/inulute/simplexity-ai-app#%EF%B8%8F-keyboard-shortcuts';
-      
-      if (showInstructionsButton) {
-        showInstructionsButton.addEventListener('click', () => {
-          window.electronAPI.openExternalLink(documentationUrl);
-        });
-      }
-    
-      const shortcutFields = document.querySelectorAll('.shortcut-input');
-      const shortcutToggles = document.querySelectorAll('.toggle-checkbox');
-      
-      shortcutToggles.forEach(toggle => {
-        const shortcutField = toggle.closest('.shortcut-item').querySelector('.shortcut-input');
-        shortcutField.disabled = !toggle.checked;
-        
-        toggle.addEventListener('change', (event) => {
-          shortcutField.disabled = !event.target.checked;
-        });
+      document.getElementById('show-instructions-button').addEventListener('click', () => {
+        window.electronAPI.openExternalLink(documentationUrl);
       });
+
+      if (window.electronAPI.platform !== 'darwin') {
+        document.getElementById('send-label').textContent = 'Send with Ctrl+Enter';
+      }
     });
-    
+
     function closeSettings() {
       window.electronAPI.closeSettings();
     }

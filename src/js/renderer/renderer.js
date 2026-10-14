@@ -98,11 +98,7 @@ document.addEventListener('DOMContentLoaded', () => {
           }
         }
         
-        const displayValue = isMac 
-          ? (shortcutKey || '').replace(/Control/g, 'Ctrl') 
-          : (shortcutKey || '').replace(/Command/g, 'Ctrl');
-          
-        input.value = displayValue;
+        input.value = displayShortcut(shortcutKey);
         
         if (shortcutToggles[key]) {
           shortcutToggles[key].checked = isEnabled;
@@ -171,6 +167,10 @@ document.addEventListener('DOMContentLoaded', () => {
         closeToTrayToggle.checked = data.closeToTray !== false;
       }
 
+      document.getElementById('toggle-discardTabs').checked = data.discardTabs !== false;
+      document.getElementById('toggle-notifyAnswers').checked = data.notifyAnswers !== false;
+      document.getElementById('toggle-showSidebarComputer').checked = data.showSidebarComputer === true;
+
       const ctrlEnterToSendToggle = document.getElementById('toggle-ctrlEnterToSend');
       if (ctrlEnterToSendToggle) {
         ctrlEnterToSendToggle.checked = data.ctrlEnterToSend || false;
@@ -238,7 +238,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         
         const keyCombo = [...modifiers, keyName].join('+');
-        input.value = keyCombo;
+        input.value = displayShortcut(keyCombo);
 
         const normalizedKey = keyCombo
           .replace(/Cmd/g, 'Command')
@@ -254,6 +254,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         checkForDuplicates();
+        saveSettings();
       });
     }
 
@@ -299,10 +300,20 @@ document.addEventListener('DOMContentLoaded', () => {
       newShortcuts = { ...defaultShortcuts };
       savedShortcuts = { ...defaultShortcuts };
       loadCurrentShortcuts();
+      saveSettings();
     });
 
-    document.getElementById('settings-form').addEventListener('submit', (event) => {
-      event.preventDefault();
+    // Every control applies as soon as it changes, like System Settings; there
+    // is no Save button. Duplicate or empty shortcuts are not saved and show a
+    // warning on their row instead.
+    const settingsForm = document.getElementById('settings-form');
+    settingsForm.addEventListener('submit', (event) => event.preventDefault());
+    settingsForm.addEventListener('change', (event) => {
+      if (event.target.id === 'toggle-autostart') return; // applied by its own handler
+      saveSettings();
+    });
+
+    function saveSettings() {
       if (checkForDuplicates(true)) {
         const autostartToggle = document.getElementById('toggle-autostart');
         
@@ -322,13 +333,15 @@ document.addEventListener('DOMContentLoaded', () => {
             .filter((box) => box.checked)
             .map((box) => box.value),
           closeToTray: closeToTrayToggle ? closeToTrayToggle.checked : true,
+          discardTabs: document.getElementById('toggle-discardTabs').checked,
+          notifyAnswers: document.getElementById('toggle-notifyAnswers').checked,
+          showSidebarComputer: document.getElementById('toggle-showSidebarComputer').checked,
           ctrlEnterToSend: ctrlEnterToSendToggle ? ctrlEnterToSendToggle.checked : false
         };
         window.electronAPI.setSettings(settingsToSave);
         savedShortcuts = { ...newShortcuts };
-        window.electronAPI.closeSettings();
       }
-    });
+    }
 
     function checkForDuplicates(finalCheck = false) {
       let valid = true;
@@ -414,6 +427,19 @@ document.addEventListener('DOMContentLoaded', () => {
       return [...modifiers, key].join('+').toLowerCase();
     }
 
+    // macOS shows shortcuts as symbols in the order ⌃⌥⇧⌘ (menus, System
+    // Settings); elsewhere the stored form ("Control+Shift+P") reads fine.
+    function displayShortcut(shortcut) {
+      if (!shortcut) return '';
+      if (!isMac) return shortcut.replace(/Command|Cmd/g, 'Ctrl').replace(/Control/g, 'Ctrl');
+      const symbols = { Control: '⌃', Ctrl: '⌃', Alt: '⌥', Option: '⌥', Shift: '⇧', Command: '⌘', Cmd: '⌘' };
+      const order = ['⌃', '⌥', '⇧', '⌘'];
+      const parts = shortcut.split('+');
+      const mods = parts.filter((p) => symbols[p]).map((p) => symbols[p]).sort((a, b) => order.indexOf(a) - order.indexOf(b));
+      const key = parts.filter((p) => !symbols[p]).join('+');
+      return mods.join('') + key;
+    }
+
     function defaultShortcutKey(key) {
       const defaults = window.__defaultShortcuts || {};
       return (defaults[key] && defaults[key].key) || '';
@@ -482,27 +508,7 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     });
   } else {
-    const loading = document.getElementById('loading');
-    if (loading) {
-      window.electronAPI.onPageLoading((isLoading) => {
-        if (isLoading) {
-          loading.classList.add('show');
-        } else {
-          loading.classList.remove('show');
-        }
-      });
-    }
-
-    window.electronAPI.getAppVersion().then((version) => {
-      const versionDisplay = document.querySelector('.version-display');
-      if (versionDisplay) {
-        versionDisplay.textContent = `v${version}`;
-      }
-    });
-    
-    initNavigationButtons();
-
-    initNotifications();
+    initTabBar();
 
     initQuickSearch();
 
@@ -514,60 +520,125 @@ function closeSettings() {
   window.electronAPI.closeSettings();
 }
 
-function initNavigationButtons() {
-  const perplexityAIButton = document.getElementById('tab1-button');
-  const secondTabButton = document.getElementById('tab2-button');
-  const refreshButton = document.querySelector('.menu-item[onclick*="refresh"]');
-  
-  if (perplexityAIButton) {
-    perplexityAIButton.addEventListener('click', (event) => {
-      event.preventDefault();
-      window.electronAPI.switchAITool('tab1');
+// Main owns the tab list and sends the whole state on every change. One element
+// per tab id is kept and updated in place, so hover and keyboard focus survive
+// the frequent title and loading updates.
+const TAB_MARKUP = `
+  <span class="tab-icon" aria-hidden="true">
+    <img class="tab-favicon" alt="">
+    <svg class="tab-glyph tab-glyph-page" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.75"/><path d="M2.25 8h11.5M8 2.25c1.9 1.6 1.9 9.9 0 11.5M8 2.25c-1.9 1.6-1.9 9.9 0 11.5"/></svg>
+    <svg class="tab-glyph tab-glyph-error" viewBox="0 0 16 16"><path d="M8 2.5 14 13.5H2Z"/><path d="M8 6.5v3.25M8 11.75v.01"/></svg>
+    <svg class="tab-glyph tab-glyph-asleep" viewBox="0 0 16 16"><path d="M12.5 10.5A5.25 5.25 0 0 1 5.5 3.5a5.25 5.25 0 1 0 7 7Z"/></svg>
+    <span class="tab-spinner"></span>
+  </span>
+  <span class="tab-title"></span>
+  <button class="tab-close" type="button" tabindex="-1">
+    <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 5 6 6m0-6-6 6"/></svg>
+  </button>`;
+
+function initTabBar() {
+  const tabList = document.getElementById('tabs');
+  const newTabButton = document.getElementById('new-tab');
+  if (!tabList || !newTabButton) return;
+
+  document.body.classList.toggle('platform-mac', window.electronAPI.platform === 'darwin');
+  window.electronAPI.onFullScreenChanged((isFullScreen) => {
+    document.body.classList.toggle('fullscreen', isFullScreen);
+  });
+  newTabButton.addEventListener('click', () => window.electronAPI.newTab());
+
+  const elements = new Map();
+
+  function createTab(id) {
+    const tab = document.createElement('div');
+    tab.className = 'tab';
+    tab.setAttribute('role', 'tab');
+    tab.dataset.id = id;
+    tab.innerHTML = TAB_MARKUP;
+    tab.addEventListener('click', (event) => {
+      if (!event.target.closest('.tab-close')) window.electronAPI.selectTab(id);
     });
+    // Middle-click closes, as in every browser.
+    tab.addEventListener('auxclick', (event) => {
+      if (event.button === 1) window.electronAPI.closeTab(id);
+    });
+    tab.querySelector('.tab-close').addEventListener('click', () => window.electronAPI.closeTab(id));
+    const favicon = tab.querySelector('.tab-favicon');
+    favicon.addEventListener('error', () => {
+      favicon.dataset.failed = favicon.getAttribute('src');
+      tab.classList.remove('has-favicon');
+    });
+    return tab;
   }
 
-  if (secondTabButton) {
-    secondTabButton.addEventListener('click', (event) => {
-      event.preventDefault();
-      window.electronAPI.switchAITool('tab2');
-    });
-  }
-  
-  if (refreshButton) {
-    refreshButton.addEventListener('click', (event) => {
-      event.preventDefault();
-      window.electronAPI.switchAITool('refresh');
-    });
-  }
-  
-  const settingsButton = document.querySelector('.menu-item[onclick*="openSettings"]');
-  if (settingsButton) {
-    settingsButton.addEventListener('click', (event) => {
-      event.preventDefault();
-      window.electronAPI.openSettings();
-    });
-  }
-}
+  // Arrow keys move focus only; Enter or Space opens the tab. Opening hands
+  // focus to the page, so automatic activation would end keyboard navigation.
+  tabList.addEventListener('keydown', (event) => {
+    const tabs = [...tabList.children];
+    const index = tabs.indexOf(document.activeElement);
+    if (index === -1) return;
+    const id = tabs[index].dataset.id;
+    const moveTo = {
+      ArrowRight: tabs[(index + 1) % tabs.length],
+      ArrowLeft: tabs[(index - 1 + tabs.length) % tabs.length],
+      Home: tabs[0],
+      End: tabs[tabs.length - 1]
+    }[event.key];
 
-function initNotifications() {
-  const notificationButton = document.getElementById('notification-button');
-  const notificationBadge = document.getElementById('notification-badge');
+    if (moveTo) {
+      tabs.forEach((tab) => { tab.tabIndex = tab === moveTo ? 0 : -1; });
+      moveTo.focus();
+    } else if (event.key === 'Enter' || event.key === ' ') {
+      window.electronAPI.selectTab(id);
+    } else if (event.key === 'Delete' || event.key === 'Backspace') {
+      window.electronAPI.closeTab(id);
+    } else {
+      return;
+    }
+    event.preventDefault();
+  });
 
-  if (notificationButton && notificationBadge) {
-    notificationButton.addEventListener('click', (event) => {
-      event.preventDefault();
-      window.electronAPI.openNotificationPanel();
-    });
-
-    window.electronAPI.onNotificationBadgeUpdate((count) => {
-      if (count > 0) {
-        notificationBadge.textContent = count > 99 ? '99+' : count;
-        notificationBadge.style.display = 'flex';
-      } else {
-        notificationBadge.style.display = 'none';
+  window.electronAPI.onTabsChanged(({ tabs, activeId }) => {
+    const open = new Set();
+    tabs.forEach((info, index) => {
+      open.add(info.id);
+      let tab = elements.get(info.id);
+      if (!tab) {
+        tab = createTab(info.id);
+        elements.set(info.id, tab);
       }
+      if (tabList.children[index] !== tab) tabList.insertBefore(tab, tabList.children[index] || null);
+
+      const title = info.error ? 'Couldn’t load page' : (info.title || 'New Tab');
+      const isActive = info.id === activeId;
+      tab.querySelector('.tab-title').textContent = title;
+      tab.title = info.error ? `${info.title || 'Page'}: ${info.error}`
+        : info.asleep ? `${title} (asleep to save memory; reloads when opened)` : title;
+      tab.querySelector('.tab-close').setAttribute('aria-label', `Close ${title}`);
+      tab.setAttribute('aria-selected', String(isActive));
+      if (!tabList.contains(document.activeElement)) tab.tabIndex = isActive ? 0 : -1;
+      tab.classList.toggle('active', isActive);
+      tab.classList.toggle('loading', Boolean(info.loading));
+      tab.classList.toggle('error', Boolean(info.error));
+      tab.classList.toggle('asleep', Boolean(info.asleep) && !isActive);
+
+      // Only https favicons, so a page cannot point the tab bar at a local file.
+      // 'app' comes from main (never from a page): Perplexity tabs show the app icon.
+      const favicon = tab.querySelector('.tab-favicon');
+      const src = info.favicon === 'app' ? 'assets/icons/png/glyph.png'
+        : typeof info.favicon === 'string' && info.favicon.startsWith('https:') ? info.favicon : '';
+      if (src && favicon.getAttribute('src') !== src) favicon.src = src;
+      tab.classList.toggle('has-favicon', Boolean(src) && favicon.dataset.failed !== src);
     });
-  }
+
+    for (const [id, tab] of elements) {
+      if (!open.has(id)) {
+        tab.remove();
+        elements.delete(id);
+      }
+    }
+    elements.get(activeId)?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  });
 }
 
 function initQuickSearch() {
