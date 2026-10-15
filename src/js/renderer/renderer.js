@@ -170,6 +170,12 @@ document.addEventListener('DOMContentLoaded', () => {
       document.getElementById('toggle-discardTabs').checked = data.discardTabs !== false;
       document.getElementById('toggle-notifyAnswers').checked = data.notifyAnswers !== false;
       document.getElementById('toggle-showSidebarComputer').checked = data.showSidebarComputer === true;
+      document.getElementById('toggle-showSidebarAutomations').checked = data.showSidebarAutomations === true;
+      document.getElementById('toggle-showMarketSummary').checked = data.showMarketSummary === true;
+      const financeTabs = Array.isArray(data.financeTabs) ? data.financeTabs : [];
+      document.querySelectorAll('.finance-tab').forEach((box) => {
+        box.checked = financeTabs.includes(box.value);
+      });
 
       const ctrlEnterToSendToggle = document.getElementById('toggle-ctrlEnterToSend');
       if (ctrlEnterToSendToggle) {
@@ -336,6 +342,9 @@ document.addEventListener('DOMContentLoaded', () => {
           discardTabs: document.getElementById('toggle-discardTabs').checked,
           notifyAnswers: document.getElementById('toggle-notifyAnswers').checked,
           showSidebarComputer: document.getElementById('toggle-showSidebarComputer').checked,
+          showSidebarAutomations: document.getElementById('toggle-showSidebarAutomations').checked,
+          financeTabs: [...document.querySelectorAll('.finance-tab')].filter((box) => box.checked).map((box) => box.value),
+          showMarketSummary: document.getElementById('toggle-showMarketSummary').checked,
           ctrlEnterToSend: ctrlEnterToSendToggle ? ctrlEnterToSendToggle.checked : false
         };
         window.electronAPI.setSettings(settingsToSave);

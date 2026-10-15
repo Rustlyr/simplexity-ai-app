@@ -1,4 +1,54 @@
-const { ipcRenderer } = require('electron');
+const { ipcRenderer, contextBridge } = require('electron');
+
+// A question asked from Finance is filed in the "Finance" project, and one
+// asked from Discover in "News", without picking the project each time.
+// Perplexity files a question in a project when the ask request carries
+// target_collection_uuid, which is what a project page sends. The page's own
+// fetch lives in its main world, so the wrapper is installed there, before
+// the page's scripts run. Only questions sent while on a Finance or Discover
+// page are touched: those always start a new thread (a Discover question
+// forks the article, so it carries last_backend_uuid too). Follow-ups happen
+// on the thread's own /search page and are left alone, as is anything
+// already headed for a project. If the project is missing or
+// the lookup fails, the question goes out unchanged.
+const ROUTE_PROJECTS = [['^/finance(/|$)', 'finance'], ['^/discover(/|$)', 'news']];
+if (location.hostname === 'www.perplexity.ai') {
+    contextBridge.executeInMainWorld({
+        args: [ROUTE_PROJECTS],
+        func: (routes) => {
+            const send = window.fetch;
+            let projects = null; // promise of { lowercased title: uuid }
+            const lookup = () => (projects = projects || send('/rest/spaces/landing/v2?limit=100&ordered=true&version=2.18&source=default')
+                .then((r) => r.json())
+                .then((j) => Object.fromEntries(Object.values(j.sections || {})
+                    .flatMap((s) => s.items || [])
+                    .map((p) => [String(p.title).trim().toLowerCase(), p.uuid]))));
+            window.fetch = async function (input, init) {
+                // The ask call passes a URL object; a Request carries .url.
+                const url = input instanceof Request ? input.url : String(input);
+                const route = routes.find(([re]) => new RegExp(re).test(location.pathname));
+                if (route && url.includes('/rest/sse/perplexity_ask') && init && typeof init.body === 'string') {
+                    try {
+                        const body = JSON.parse(init.body);
+                        const p = body.params;
+                        if (p && !p.target_collection_uuid) {
+                            const uuid = (await lookup())[route[1]];
+                            if (uuid) {
+                                p.target_collection_uuid = uuid;
+                                p.target_thread_access_level = 1; // "Only you can view", as a project page sends
+                                init = { ...init, body: JSON.stringify(body) };
+                            }
+                        }
+                    } catch (err) {
+                        projects = null; // try the lookup again next time
+                        console.warn('[simplex] could not file the question in a project:', err.message);
+                    }
+                }
+                return send.call(this, input, init);
+            };
+        },
+    });
+}
 
 window.addEventListener('DOMContentLoaded', () => {
     const isLabs = window.location.hostname.includes('labs.perplexity.ai');
@@ -35,6 +85,33 @@ window.addEventListener('DOMContentLoaded', () => {
         { id: 'academic', label: 'Academic',     path: '/academic', icon: 'pplx-icon-school' },
         { id: 'patents',  label: 'Patents',      path: '/patents',  icon: 'pplx-icon-gavel' },
     ];
+
+    // Perplexity's router follows history.pushState once it hears popstate, so
+    // this is an in-app navigation (measured: same document, Back still works).
+    function navigateInApp(path) {
+        if (location.pathname + location.search === path) return;
+        history.pushState(history.state, '', path);
+        window.dispatchEvent(new PopStateEvent('popstate', { state: history.state }));
+    }
+
+    // Finance opens on the tab that was open last, across restarts, instead
+    // of always on US Markets. Each tab is its own path.
+    const FINANCE_TAB_PATH = /^\/finance(\/(crypto|earnings|predictions|screener|politicians|watchlist|workflows|gallery))?$/;
+    const FINANCE_KEY = 'simplex:finance-path';
+    function lastFinancePath() {
+        const saved = localStorage.getItem(FINANCE_KEY);
+        return saved && FINANCE_TAB_PATH.test(saved) ? saved : '/finance';
+    }
+
+    // Finance's Market Summary block has no stable hook, only its heading.
+    // Mark the block so the app's stylesheet can hide it (a Settings switch).
+    function markMarketSummary() {
+        if (!location.pathname.startsWith('/finance')) return;
+        for (const heading of document.querySelectorAll('main h2')) {
+            const block = heading.parentElement && heading.parentElement.parentElement;
+            if (block && !block.hasAttribute('data-simplex-market-summary') && heading.textContent.trim() === 'Market Summary') block.setAttribute('data-simplex-market-summary', '');
+        }
+    }
 
     const INJECTED_ATTR = 'data-simplexity-shortcut';
     let enabledIds = [];
@@ -90,6 +167,14 @@ window.addEventListener('DOMContentLoaded', () => {
                 if (!anchor) continue;
                 anchor.setAttribute('href', link.path);
                 anchor.setAttribute('aria-label', link.label);
+                // A cloned row is not wired to Perplexity's router, so a plain
+                // click reloaded the whole page (the jank on opening Finance).
+                // Route it in-app instead; modified clicks keep the browser's.
+                anchor.addEventListener('click', (event) => {
+                    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                    event.preventDefault();
+                    navigateInApp(link.id === 'finance' ? lastFinancePath() : link.path);
+                });
 
                 const use = clone.querySelector('svg use');
                 if (use) {
@@ -330,6 +415,9 @@ window.addEventListener('DOMContentLoaded', () => {
     // still fast enough to catch a nag modal.
     let sweepPending = false;
     const observer = new MutationObserver(() => {
+        // Unbatched, so the block is hidden before it is ever painted (in the
+        // 250 ms pass it showed for ~13 frames). A few h2 lookups, Finance only.
+        if (isMain) markMarketSummary();
         if (sweepPending) return;
         sweepPending = true;
         setTimeout(() => {
@@ -340,6 +428,7 @@ window.addEventListener('DOMContentLoaded', () => {
                 removeNagScreens(mainSelectors);
                 syncSidebarLinks();
                 watchRoute();
+                if (!projectsWarmed && performance.now() > WARM_AFTER_MS) warmProjects();
             }
         }, 250);
     });
@@ -357,6 +446,7 @@ window.addEventListener('DOMContentLoaded', () => {
         const path = watchedPath;
         // Project pages are where an icon gets changed.
         if (/^\/(projects|spaces)\//.test(path)) refreshProjectIcons();
+        if (FINANCE_TAB_PATH.test(path)) localStorage.setItem(FINANCE_KEY, path);
         setTimeout(() => { if (location.pathname === path && projectsLookBroken()) reloadOnce(); }, RECHECK_AFTER_MS);
     }
 
@@ -436,6 +526,28 @@ window.addEventListener('DOMContentLoaded', () => {
         }
         projectIconStyle.textContent = css;
     }
+
+    // A project page waits on Perplexity's SpaceProjectThreadsRelayQuery, which
+    // its server answers in anything from 0.4 s to over 20 s (the same query
+    // replayed: 0.4-74 s; the user's slow-requests.log had one at 20 s). That
+    // wait is what the skeleton rows are. Perplexity prefetches a project's
+    // data when its sidebar link is hovered and keeps it for the page's life,
+    // so a click after that is instant. Hover every project once, a few
+    // seconds after load, so the wait happens before the click instead of on it.
+    const WARM_AFTER_MS = 5000;
+    let projectsWarmed = false;
+    function warmProjects() {
+        const links = document.querySelectorAll('nav [data-sidebar-session-row] > a[href^="/projects/"]');
+        if (projectsWarmed || !links.length) return;
+        projectsWarmed = true;
+        for (const a of links) {
+            for (const type of ['pointerover', 'mouseover', 'pointerout', 'mouseout']) {
+                const Ctor = type.startsWith('pointer') ? PointerEvent : MouseEvent;
+                a.dispatchEvent(new Ctor(type, { bubbles: true, pointerType: 'mouse' }));
+            }
+        }
+    }
+    // end warmProjects
 
     function refreshProjectIcons() {
         paintProjectIcons().catch((err) => console.warn('[simplex] project icons:', err.message));

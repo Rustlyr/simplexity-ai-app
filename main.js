@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, BrowserView, Menu, MenuItem, globalShortcut, Tray, nativeImage, shell, net, Notification, clipboard, dialog, session } = require('electron');
+const { app, BrowserWindow, ipcMain, BrowserView, Menu, MenuItem, globalShortcut, Tray, nativeImage, shell, net, Notification, clipboard, dialog, session, powerMonitor } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const Store = require('electron-store');
@@ -91,6 +91,8 @@ let tabMeta = {};
 const DISCARD_AFTER_MS = 30 * 60 * 1000;
 // Perplexity's sidebar out of the box: Finance takes Computer's place (see pageCSS).
 const DEFAULT_SIDEBAR_SHORTCUTS = ['finance'];
+// Finance's section tabs, by the id at the end of each tab's Radix id.
+const FINANCE_TABS = ['market', 'crypto', 'earnings', 'predictions', 'screener', 'politicians', 'watchlist', 'workflows', 'gallery'];
 let tabLastShown = {};
 let discardedUrls = {};
 let activeTabId = DEFAULT_TAB_ID;
@@ -956,6 +958,17 @@ function pageCSS() {
   if (!settings.get('showSidebarComputer', false)) {
     css += '\nnav [class*="collapsible-sidebar-section"]:has(a[href^="/computer/tasks"]) { display: none !important; }';
   }
+  if (!settings.get('showSidebarAutomations', false)) {
+    css += '\nnav [class*="collapsible-sidebar-section"]:has(a[href^="/computer/automations"]) { display: none !important; }';
+  }
+  const financeTabs = settings.get('financeTabs', FINANCE_TABS);
+  for (const id of FINANCE_TABS.filter((tab) => !financeTabs.includes(tab))) {
+    css += `\n[role="tablist"][aria-label="Finance sections"] > [role="tab"][id$="-trigger-${id}"] { display: none !important; }`;
+  }
+  // preload_inject.js marks the block; it has no stable hook of its own.
+  if (!settings.get('showMarketSummary', false)) {
+    css += '\n[data-simplex-market-summary] { display: none !important; }';
+  }
   return css;
 }
 
@@ -1670,10 +1683,22 @@ ipcMain.on('set-settings', (event, data) => {
     broadcastSidebarShortcuts();
   }
 
-  if (data.showSidebarComputer !== undefined && data.showSidebarComputer !== settings.get('showSidebarComputer', false)) {
-    settings.set('showSidebarComputer', data.showSidebarComputer === true);
-    Object.values(views).forEach((view) => applyPageCSS(view.webContents));
+  // These only change the page stylesheet, so re-apply it to every tab.
+  let restyle = false;
+  for (const key of ['showSidebarComputer', 'showSidebarAutomations', 'showMarketSummary']) {
+    if (data[key] !== undefined && data[key] !== settings.get(key, false)) {
+      settings.set(key, data[key] === true);
+      restyle = true;
+    }
   }
+  if (Array.isArray(data.financeTabs)) {
+    const tabs = FINANCE_TABS.filter((id) => data.financeTabs.includes(id));
+    if (tabs.join() !== settings.get('financeTabs', FINANCE_TABS).join()) {
+      settings.set('financeTabs', tabs);
+      restyle = true;
+    }
+  }
+  if (restyle) Object.values(views).forEach((view) => applyPageCSS(view.webContents));
 
   if (data.closeToTray !== undefined) {
     settings.set('closeToTray', data.closeToTray);
@@ -1716,6 +1741,9 @@ ipcMain.on('get-settings', (event) => {
     restoreLastSession: settings.get('restoreLastSession', true),
     sidebarShortcuts: settings.get('sidebarShortcuts', DEFAULT_SIDEBAR_SHORTCUTS),
     showSidebarComputer: settings.get('showSidebarComputer', false),
+    showSidebarAutomations: settings.get('showSidebarAutomations', false),
+    financeTabs: settings.get('financeTabs', FINANCE_TABS),
+    showMarketSummary: settings.get('showMarketSummary', false),
     defaultShortcuts,
     ctrlEnterToSend: settings.get('ctrlEnterToSend', false),
     discardTabs: settings.get('discardTabs', true),
@@ -1951,8 +1979,32 @@ app.whenReady().then(() => {
     if (details.statusCode === 200) answering.add(details.id);
   });
   const answerEnded = (details) => { if (answering.delete(details.id)) notifyAnswerReady(details.webContentsId); };
-  session.defaultSession.webRequest.onCompleted(answerStream, answerEnded);
-  session.defaultSession.webRequest.onErrorOccurred(answerStream, answerEnded);
+
+  // A long thread sometimes took 10-20 s to open for the user, but measured
+  // runs never did (thread API 1.3-1.9 s, render under 2.5 s). Write down any
+  // Perplexity API call slower than SLOW_REQUEST_MS, with how long since the
+  // Mac last woke, so the next slow open shows where the time went. Electron
+  // keeps one listener per event, so this shares onCompleted with the above.
+  const SLOW_REQUEST_MS = 5000;
+  const api = { urls: ['*://www.perplexity.ai/rest/*'] };
+  const started = new Map();
+  let resumedAt = 0;
+  powerMonitor.on('resume', () => { resumedAt = Date.now(); });
+  session.defaultSession.webRequest.onSendHeaders(api, (details) => { started.set(details.id, details.timestamp); });
+  const apiEnded = (details) => {
+    answerEnded(details);
+    const start = started.get(details.id);
+    started.delete(details.id);
+    // The answer stream stays open while the answer is written; it is slow by design.
+    if (!start || details.url.includes('/rest/sse/') || details.timestamp - start < SLOW_REQUEST_MS) return;
+    const line = [new Date().toISOString(), `${Math.round(details.timestamp - start)}ms`,
+      details.statusCode || details.error, details.fromCache ? 'cache' : 'net',
+      resumedAt ? `woke ${Math.round((Date.now() - resumedAt) / 1000)}s ago` : 'no wake since launch',
+      details.url.split('?')[0]].join('  ');
+    fs.appendFile(path.join(app.getPath('userData'), 'slow-requests.log'), line + '\n', () => {});
+  };
+  session.defaultSession.webRequest.onCompleted(api, apiEnded);
+  session.defaultSession.webRequest.onErrorOccurred(api, apiEnded);
   // A packaged build takes its Dock icon from the bundle's .icns, which macOS can
   // restyle; `npm start` runs the stock Electron.app, so show ours there too.
   if (isMac && !app.isPackaged) app.dock.setIcon(path.join(__dirname, 'assets', 'icons', 'png', 'favicon.png'));
