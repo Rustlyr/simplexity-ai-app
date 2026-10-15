@@ -11,40 +11,78 @@ const { ipcRenderer, contextBridge } = require('electron');
 // on the thread's own /search page and are left alone, as is anything
 // already headed for a project. If the project is missing or
 // the lookup fails, the question goes out unchanged.
+// The answer stream carries no collection_info, and the thread header's
+// project pill reads it from the streamed result, so the pill would stay
+// hidden until the thread is reopened. The stream of a filed question
+// therefore gets the project's collection_info added to each answer event.
 const ROUTE_PROJECTS = [['^/finance(/|$)', 'finance'], ['^/discover(/|$)', 'news']];
 if (location.hostname === 'www.perplexity.ai') {
     contextBridge.executeInMainWorld({
         args: [ROUTE_PROJECTS],
         func: (routes) => {
             const send = window.fetch;
-            let projects = null; // promise of { lowercased title: uuid }
+            let projects = null; // promise of { lowercased title: project }
             const lookup = () => (projects = projects || send('/rest/spaces/landing/v2?limit=100&ordered=true&version=2.18&source=default')
                 .then((r) => r.json())
                 .then((j) => Object.fromEntries(Object.values(j.sections || {})
                     .flatMap((s) => s.items || [])
-                    .map((p) => [String(p.title).trim().toLowerCase(), p.uuid]))));
+                    .map((p) => [String(p.title).trim().toLowerCase(), p]))));
+            // SSE lines are "data: {json}"; events split across chunks are joined first.
+            const withCollection = (res, project) => {
+                if (!res.ok || !res.body) return res;
+                const enc = new TextEncoder();
+                const dec = new TextDecoder();
+                let rest = '';
+                const fix = (line) => {
+                    if (!line.startsWith('data: {')) return line;
+                    try {
+                        const event = JSON.parse(line.slice(6));
+                        if (!('backend_uuid' in event) || event.collection_info) return line;
+                        event.collection_info = project;
+                        return 'data: ' + JSON.stringify(event) + (line.endsWith('\r') ? '\r' : '');
+                    } catch {
+                        return line;
+                    }
+                };
+                const body = res.body.pipeThrough(new TransformStream({
+                    transform(chunk, out) {
+                        rest += dec.decode(chunk, { stream: true });
+                        const lines = rest.split('\n');
+                        rest = lines.pop();
+                        if (lines.length) out.enqueue(enc.encode(lines.map(fix).join('\n') + '\n'));
+                    },
+                    flush(out) {
+                        rest += dec.decode();
+                        if (rest) out.enqueue(enc.encode(fix(rest)));
+                    },
+                }));
+                return new Response(body, { status: res.status, statusText: res.statusText, headers: res.headers });
+            };
             window.fetch = async function (input, init) {
                 // The ask call passes a URL object; a Request carries .url.
                 const url = input instanceof Request ? input.url : String(input);
                 const route = routes.find(([re]) => new RegExp(re).test(location.pathname));
+                let project = null;
                 if (route && url.includes('/rest/sse/perplexity_ask') && init && typeof init.body === 'string') {
                     try {
                         const body = JSON.parse(init.body);
                         const p = body.params;
                         if (p && !p.target_collection_uuid) {
-                            const uuid = (await lookup())[route[1]];
-                            if (uuid) {
-                                p.target_collection_uuid = uuid;
+                            project = (await lookup())[route[1]] || null;
+                            if (project) {
+                                p.target_collection_uuid = project.uuid;
                                 p.target_thread_access_level = 1; // "Only you can view", as a project page sends
                                 init = { ...init, body: JSON.stringify(body) };
                             }
                         }
                     } catch (err) {
                         projects = null; // try the lookup again next time
+                        project = null;
                         console.warn('[simplex] could not file the question in a project:', err.message);
                     }
                 }
-                return send.call(this, input, init);
+                const res = await send.call(this, input, init);
+                return project ? withCollection(res, project) : res;
             };
         },
     });
