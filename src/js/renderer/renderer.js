@@ -555,6 +555,10 @@ function initTabBar() {
     document.body.classList.toggle('fullscreen', isFullScreen);
   });
   newTabButton.addEventListener('click', () => window.electronAPI.newTab());
+  const blockedCount = document.getElementById('privacy-count');
+  window.electronAPI.onBlockedCount((count) => {
+    if (blockedCount) blockedCount.textContent = ` · ${count.toLocaleString()} blocked`;
+  });
 
   const elements = new Map();
 

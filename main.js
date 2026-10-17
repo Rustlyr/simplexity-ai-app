@@ -934,6 +934,46 @@ function focusComposer() {
 // the Computer row is hidden unless Settings asks for it. The glyph is a mask
 // filled with the text colour, so it has no tile and follows light and dark.
 let appGlyphDataUrl = null;
+// "Ink": graphite and warm ink instead of Perplexity's palette, hairlines
+// instead of shadows, one brass accent for focus and selection. Perplexity
+// derives every surface, text and border colour from a few base colours
+// (--odin-dark-100/200/1000; light: --odin-light-0/100/1000 and
+// --shiva-light-900), so replacing those restyles the
+// whole page without touching its DOM; fonts are left as they are. The
+// Computer mode button and "Add your team" are hidden.
+const INK_CSS = `
+html:root {
+  --odin-dark-100: oklch(17% 0.004 260);
+  --odin-dark-200: oklch(20.5% 0.004 260);
+  --odin-dark-1000: oklch(92% 0.006 90);
+  --odin-light-0: oklch(99.3% 0.003 90);
+  --odin-light-100: oklch(97.5% 0.005 90);
+  --odin-light-1000: oklch(22% 0.006 260);
+  --shiva-light-900: oklch(22% 0.006 260);
+}
+html[data-color-scheme][data-color-scheme] {
+  --ink-accent: oklch(55% 0.12 70);
+  --shadow-inner-sm: inset 0 0 0 1px var(--border-soft);
+  --shadow-sm-idle: 0 0 0 1px var(--border-soft);
+  --shadow-sm-hover: 0 0 0 1px var(--border-base);
+  --shadow-sm-focus: 0 0 0 1px var(--border-base);
+  --shadow-md-idle: 0 0 0 1px var(--border-soft);
+  --shadow-md-hover: 0 0 0 1px var(--border-base);
+  --shadow-md-focus: 0 0 0 1px var(--border-base);
+  --shadow-lg: 0 0 0 1px var(--border-base);
+  --shadow-xl: 0 0 0 1px var(--border-base);
+}
+html[data-color-scheme="dark"][data-color-scheme] { --ink-accent: oklch(78% 0.11 75); }
+::selection { background: color-mix(in oklch, var(--ink-accent) 35%, transparent); }
+[contenteditable="true"], textarea, input { caret-color: var(--ink-accent); }
+:focus-visible { outline-color: var(--ink-accent); }
+button:has(use[*|href="#pplx-icon-custom-computer"]),
+span:has(> span > span > button use[*|href="#pplx-icon-custom-computer"]),
+nav button:has(use[*|href="#pplx-icon-user-plus"]) { display: none !important; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}`;
+
 function pageCSS() {
   appGlyphDataUrl = appGlyphDataUrl || nativeImage
     .createFromPath(path.join(__dirname, 'assets', 'icons', 'png', 'glyph.png'))
@@ -943,6 +983,7 @@ function pageCSS() {
     ${logo} > * { visibility: hidden; }
     ${logo}::after { content: ""; position: absolute; inset: 0; background: currentColor;
       -webkit-mask: url("${appGlyphDataUrl}") center / 24px no-repeat; pointer-events: none; }`;
+  css += '\n' + INK_CSS;
   if (!settings.get('showSidebarComputer', false)) {
     css += '\nnav [class*="collapsible-sidebar-section"]:has(a[href^="/computer/tasks"]) { display: none !important; }';
   }
@@ -1744,6 +1785,9 @@ configureAppForBetterPerformance();
 // site; drop both so requests look like the Chrome build Electron ships.
 app.userAgentFallback = app.userAgentFallback.replace(/ (SimplexityAI|Electron)\/\S+/g, '');
 
+let blockedRequests = 0;
+let blockedTimer = null;
+
 app.whenReady().then(() => {
   app.setAboutPanelOptions({ applicationName: APP_DISPLAY_NAME });
   // Analytics and tracking the page sends on its own, none of which the app
@@ -1763,7 +1807,16 @@ app.whenReady().then(() => {
         '*://static.cloudflareinsights.com/*',
       ],
     },
-    (_details, callback) => callback({ cancel: true })
+    (_details, callback) => {
+      callback({ cancel: true });
+      blockedRequests++;
+      // The tab bar shows the running count; at most one update a second.
+      if (blockedTimer) return;
+      blockedTimer = setTimeout(() => {
+        blockedTimer = null;
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('blocked-count', blockedRequests);
+      }, 1000);
+    }
   );
 
   // Electron has no Web Push service (subscribe fails with "push service not

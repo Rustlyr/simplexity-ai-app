@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   selectTab: (tabId) => ipcRenderer.send('tab-select', tabId),
   closeTab: (tabId) => ipcRenderer.send('tab-close', tabId),
   newTab: () => ipcRenderer.send('tab-new'),
+  onBlockedCount: (callback) => ipcRenderer.on('blocked-count', (event, count) => callback(count)),
   openSettings: () => ipcRenderer.send('open-settings'),
   getShortcuts: () => ipcRenderer.send('get-shortcuts'),
   onShortcutsReceived: (callback) => ipcRenderer.on('shortcuts', (event, shortcuts) => callback(shortcuts)),
