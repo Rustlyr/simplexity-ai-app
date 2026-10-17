@@ -89,22 +89,7 @@ if (location.hostname === 'www.perplexity.ai') {
 }
 
 window.addEventListener('DOMContentLoaded', () => {
-    const isLabs = window.location.hostname.includes('labs.perplexity.ai');
-    const isMain = window.location.hostname.includes('perplexity.ai') && !isLabs;
-
-    const mainSelectors = [
-        'div.items-stretch.md\\:items-center.fill-mode-both.fixed.bottom-0.left-0.right-0.top-0.bg-backdrop\\/70.backdrop-blur-sm.animate-in.fade-in.ease-outExpo.duration-200',
-        'div.max-w-\\[400px\\].overflow-hidden.rounded-xl.md\\:flex.md\\:max-w-\\[960px\\].border-borderMain\\/50',
-        'relative.flex.flex-col.p-lg.md\\:w-\\[45\\%\\].md\\:p-xl',
-        'md\\:h-\\[55\\%\\].md\\:w-\\[55\\%\\]',
-        'rounded-lg.p-md.duration-300.ease-out.animate-in.fade-in.\\!p-lg.border-borderMain\\/50.ring-borderMain\\/50.divide-borderMain\\/50.dark\\:divide-borderMainDark\\/50.dark\\:ring-borderMainDark\\/50.dark\\:border-borderMainDark\\/50.bg-offset.dark\\:bg-offsetDark',
-        
-    ];
-
-    const labsSelectors = [
-        'div.flex.items-center.gap-sm'
-    ];
-
+    const isMain = window.location.hostname.includes('perplexity.ai');
 
     // Perplexity keeps Discover, Finance, Personal CFO, Health, Academic and
     // Patents behind the top-right menu, two clicks away. A user can promote
@@ -230,23 +215,6 @@ window.addEventListener('DOMContentLoaded', () => {
         } finally {
             injecting = false;
         }
-    }
-
-    // querySelectorAll throws a SyntaxError on a malformed selector, and this
-    // runs inside a DOMContentLoaded listener, so one bad entry took the whole
-    // script down with it -- including the MutationObserver registration below.
-    // That is why nag screens were never actually being removed. Isolate each
-    // selector so a future typo degrades instead of disabling everything.
-    function removeNagScreens(selectors) {
-        selectors.forEach((selector) => {
-            try {
-                document.querySelectorAll(selector).forEach((el) => {
-                    el.remove();
-                });
-            } catch (err) {
-                console.warn('[simplexity] skipping invalid nag-screen selector:', selector, err.message);
-            }
-        });
     }
 
     // Perplexity refuses a query over 40,000 characters (measured: 64,000 typed
@@ -438,19 +406,14 @@ window.addEventListener('DOMContentLoaded', () => {
         if (swipeTravel < 0) history.back(); else history.forward();
     }, { passive: true, capture: true });
 
-    if (isLabs) {
-        removeNagScreens(labsSelectors);
-    } else if (isMain) {
-        removeNagScreens(mainSelectors);
-        syncSidebarLinks();
-    }
+    if (isMain) syncSidebarLinks();
 
 
     // Perplexity mutates the DOM on every streamed token and every keystroke,
     // and each pass below runs several whole-document queries (about 2 ms on the
     // home page, more on a long thread). Running one per mutation batch stacked
     // that cost onto every token, so batch them: at most one pass per 250 ms,
-    // still fast enough to catch a nag modal.
+    // still prompt for the sidebar and route checks.
     let sweepPending = false;
     const observer = new MutationObserver(() => {
         // Unbatched, so the block is hidden before it is ever painted (in the
@@ -460,12 +423,10 @@ window.addEventListener('DOMContentLoaded', () => {
         sweepPending = true;
         setTimeout(() => {
             sweepPending = false;
-            if (isLabs) {
-                removeNagScreens(labsSelectors);
-            } else if (isMain) {
-                removeNagScreens(mainSelectors);
+            if (isMain) {
                 syncSidebarLinks();
                 watchRoute();
+                addClearUnpinned();
                 if (!projectsWarmed && performance.now() > WARM_AFTER_MS) warmProjects();
             }
         }, 250);
@@ -589,6 +550,116 @@ window.addEventListener('DOMContentLoaded', () => {
 
     function refreshProjectIcons() {
         paintProjectIcons().catch((err) => console.warn('[simplex] project icons:', err.message));
+    }
+
+    // Library: "Clear unpinned" deletes every session except pinned ones, so
+    // old chats can be cleared without ticking each row. Pinned means pinned
+    // in the sidebar or pinned inside any project. It fails closed: if any pin
+    // list cannot be read in full, nothing is deleted. Deletion uses the same
+    // request as the Library's own Delete (context_uuids, 64 per call).
+    const CLEAR_ATTR = 'data-simplex-clear-unpinned';
+    const JSON_HEADERS = { 'content-type': 'application/json', 'x-app-apiclient': 'default', 'x-app-apiversion': '2.18' };
+
+    async function getJson(url, init) {
+        const res = await fetch(url, init);
+        if (!res.ok) throw new Error(`${url.split('?')[0]} answered ${res.status}`);
+        return res.json();
+    }
+
+    async function listUnpinnedSessions(progress) {
+        // Each page of 100 takes the server 1-4 s and the response carries no
+        // usable total, so ask for 4 pages at a time. A short page is NOT the
+        // end (measured: offset 1800 gave 99 with 400 more after it); the end
+        // is an empty page or a last item with has_next_page false.
+        const PAGE = 100;
+        const WAVE = 4;
+        const byContext = new Map();
+        const listPage = (offset) => getJson('/rest/thread/list_ask_threads?' + API, {
+            method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ limit: PAGE, offset, ascending: false, search_term: '' }),
+        });
+        for (let offset = 0, done = false; !done; offset += PAGE * WAVE) {
+            if (offset >= 100000) throw new Error('the session list did not end');
+            const pages = await Promise.all(Array.from({ length: WAVE }, (_, i) => listPage(offset + i * PAGE)));
+            for (const page of pages) {
+                if (!Array.isArray(page)) throw new Error('unexpected session list');
+                page.forEach((t) => byContext.set(t.context_uuid, t));
+                if (!page.length || page[page.length - 1].has_next_page === false) done = true;
+            }
+            progress(byContext.size);
+        }
+        const threads = [...byContext.values()];
+
+        const pinned = new Set();
+        const keep = (t) => { if (t && t.context_uuid) pinned.add(t.context_uuid); if (t && t.uuid) pinned.add(t.uuid); };
+        // The pin list caps at 50 and has no next page, so a full one cannot be trusted.
+        const PIN_LIMIT = 50;
+        const pins = await getJson(`/rest/pins?limit=${PIN_LIMIT}&` + API);
+        if (!Array.isArray(pins.items) || pins.items.length >= PIN_LIMIT) throw new Error('could not read every sidebar pin');
+        pins.items.forEach((item) => keep(item.thread));
+
+        const sections = Object.values((await getJson('/rest/spaces/landing/v2?limit=100&ordered=true&' + API)).sections || {});
+        if (sections.some((section) => section.next_cursor)) throw new Error('could not read every project');
+        for (const project of sections.flatMap((section) => section.items || [])) {
+            const projectPins = await getJson(`/rest/spaces/${project.uuid}/pins/threads?` + API);
+            if (!Array.isArray(projectPins)) throw new Error('could not read pins of ' + project.title);
+            projectPins.forEach(keep);
+        }
+
+        const unpinned = threads.filter((t) => t.context_uuid && !pinned.has(t.context_uuid) && !pinned.has(t.uuid));
+        return { unpinned, keptCount: threads.length - unpinned.length };
+    }
+
+    async function clearUnpinned(button) {
+        const label = button.querySelector('span') || button;
+        const idle = label.textContent;
+        button.disabled = true;
+        label.textContent = 'Checking…';
+        let deleted = 0;
+        try {
+            const { unpinned, keptCount } = await listUnpinnedSessions((n) => { label.textContent = `Checking ${n.toLocaleString()}…`; });
+            if (!unpinned.length) {
+                alert('There are no unpinned sessions to delete.');
+                return;
+            }
+            const sure = confirm(`Delete ${unpinned.length.toLocaleString()} unpinned sessions?\n\n`
+                + `${keptCount.toLocaleString()} pinned sessions (sidebar and project pins) are kept. This cannot be undone.`);
+            if (!sure) return;
+            for (let i = 0; i < unpinned.length; i += 64) {
+                const contextUuids = unpinned.slice(i, i + 64).map((t) => t.context_uuid);
+                label.textContent = `Deleting ${deleted.toLocaleString()} / ${unpinned.length.toLocaleString()}…`;
+                await getJson('/rest/thread?' + API, {
+                    method: 'DELETE', headers: JSON_HEADERS, body: JSON.stringify({ entry_uuids: [], context_uuids: contextUuids, read_write_token: '' }),
+                });
+                deleted += contextUuids.length;
+            }
+            location.reload(); // the list and the sidebar both come back without the deleted sessions
+        } catch (err) {
+            console.warn('[simplex] clear unpinned:', err.message);
+            alert(`Stopped: ${err.message}.\n\n${deleted.toLocaleString()} sessions were deleted before it stopped; nothing else was touched.`);
+        } finally {
+            button.disabled = false;
+            label.textContent = idle;
+        }
+    }
+
+    function addClearUnpinned() {
+        if (location.pathname !== '/library' || document.querySelector('[' + CLEAR_ATTR + ']')) return;
+        const newLink = [...document.querySelectorAll('main a[href]')].find((a) => a.textContent.trim() === 'New');
+        if (!newLink || !newLink.parentElement) return;
+        // Same look as the "New" button next to it.
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = newLink.className;
+        button.innerHTML = newLink.innerHTML;
+        button.setAttribute(CLEAR_ATTR, '');
+        button.title = 'Delete every session that is not pinned';
+        const use = button.querySelector('use');
+        if (use) use.setAttribute('xlink:href', '#pplx-icon-trash');
+        const text = button.querySelector('span');
+        if (!text) return;
+        text.textContent = 'Clear unpinned';
+        button.addEventListener('click', () => clearUnpinned(button));
+        newLink.parentElement.before(button);
     }
 
     observer.observe(document.body, { childList: true, subtree: true });

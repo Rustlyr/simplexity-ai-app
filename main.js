@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, BrowserView, Menu, MenuItem, globalShortcut, Tray, nativeImage, shell, net, Notification, clipboard, dialog, session, powerMonitor } = require('electron');
+const { app, BrowserWindow, ipcMain, BrowserView, Menu, globalShortcut, Tray, nativeImage, shell, Notification, clipboard, dialog, session, powerMonitor } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const Store = require('electron-store');
@@ -50,7 +50,6 @@ const windowStateKeeper = require('electron-window-state');
 })();
 
 const settings = new Store();
-const NotificationManager = require('./notification-manager');
 const SearchService = require('./search-service');
 
 // Shown in the menu bar, window title, tray and notifications. package.json's top-level
@@ -100,8 +99,6 @@ const isTabId = (value) => tabOrder.includes(value);
 let findBarOpen = false;
 let tray = null;
 let settingsWindow = null;
-let updateWindow = null;
-let notificationManager;
 let searchService;
 let prefixSearchWindow = null; 
 let launchedHidden = process.argv.includes('--hidden') || process.argv.includes('--start-minimized');
@@ -111,9 +108,7 @@ let autoStartEnabled = settings.get('autoStartEnabled', false);
 
 let originalClipboardContent = '';
 
-let lastUpdateCheck = 0;
 let shortcutsRegistered = false;
-const UPDATE_CHECK_INTERVAL = 12 * 60 * 60 * 1000; // Check twice per day (every 12 hours)
 
 function configureAutoStart(enable) {
   try {
@@ -518,8 +513,7 @@ function createWindow() {
   // Cmd+Q, Cmd+W and Cmd+M only exist on macOS when a menu item carries them, so the app and
   // window menus are needed, not decorative. They also hold what the removed sidebar offered.
   const settingsItems = [
-    { label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: () => { detachAllShortcuts(); openSettingsWindow(); } },
-    { label: 'Notifications', click: () => notificationManager.showNotificationPanel() }
+    { label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: () => { detachAllShortcuts(); openSettingsWindow(); } }
   ];
   // Close Tab acts on whichever window has focus, so Cmd+W in Settings closes Settings, not a tab.
   const tabItems = [
@@ -650,11 +644,6 @@ function createWindow() {
     }
     registerShortcuts();
     loadDefaultAI();
-    checkForUpdates();
-    
-    notificationManager.checkForNotifications();
-    
-    notificationManager.updateBadge();
     
     configureAutoStart(autoStartEnabled);
   });
@@ -726,7 +715,6 @@ function createWindow() {
     }
   });
   
-  notificationManager = new NotificationManager(mainWindow);
   
   searchService = new SearchService(mainWindow, switchView);
   
@@ -1422,168 +1410,6 @@ function createTray() {
   }
 }
 
-ipcMain.on('remind-tomorrow-update', () => {
-  const almostOneDayAgo = Date.now() - (23 * 60 * 60 * 1000);
-  lastUpdateCheck = almostOneDayAgo;
-  settings.set('lastUpdateCheck', lastUpdateCheck);
-  
-  console.log('Update reminder scheduled for tomorrow');
-  
-  if (updateWindow) {
-    updateWindow.close();
-    updateWindow = null;
-  }
-});
-
-ipcMain.on('download-update', () => {
-  const downloadUrl = 'https://github.com/inulute/simplexity-ai-app/releases/latest';
-  
-  shell.openExternal(downloadUrl);
-  
-  // Close the update window
-  if (updateWindow) {
-    updateWindow.close();
-    updateWindow = null;
-  }
-});
-
-function checkForUpdates() {
-  const currentTime = Date.now();
-  
-  if (lastUpdateCheck !== 0 && (currentTime - lastUpdateCheck < UPDATE_CHECK_INTERVAL)) {
-    console.log('Skipping update check - checked recently');
-    return;
-  }
-  
-  const currentVersion = app.getVersion();
-  console.log(`Checking for updates. Current version: ${currentVersion}`);
-  
-  const randomDelay = Math.floor(Math.random() * 5000); 
-  setTimeout(() => performUpdateCheck(currentVersion, 0), randomDelay);
-}
-
-function performUpdateCheck(currentVersion, retryCount) {
-  const maxRetries = 3;
-  
-  const timestamp = Date.now();
-  const url = `https://raw.githubusercontent.com/inulute/simplexity-ai-app/main/package.json?_=${timestamp}`;
-  
-  const request = net.request({
-    url: url,
-    method: 'GET'
-  });
-  
-  request.setHeader('User-Agent', `SimplexityAIDesktop/${currentVersion}`);
-  
-  let timeoutId = setTimeout(() => {
-    console.error('Update check timed out');
-    request.abort();
-    
-    if (retryCount < maxRetries) {
-      const backoffTime = Math.pow(2, retryCount) * 3000; 
-      console.log(`Retrying update check after ${backoffTime}ms (attempt ${retryCount + 1}/${maxRetries})`);
-      setTimeout(() => performUpdateCheck(currentVersion, retryCount + 1), backoffTime);
-    }
-  }, 15000); 
-  request.on('response', (response) => {
-    clearTimeout(timeoutId);
-    
-    if (response.statusCode === 429) {
-      console.log('Rate limited while checking for updates. Will try again later.');
-      return;
-    }
-    
-    if (response.statusCode !== 200) {
-      console.error(`Failed to check for updates: HTTP ${response.statusCode}`);
-      
-      if (retryCount < maxRetries) {
-        const backoffTime = Math.pow(2, retryCount) * 3000; // Exponential backoff
-        console.log(`Retrying update check after ${backoffTime}ms (attempt ${retryCount + 1}/${maxRetries})`);
-        setTimeout(() => performUpdateCheck(currentVersion, retryCount + 1), backoffTime);
-      }
-      return;
-    }
-    
-    let body = '';
-    response.on('data', (chunk) => (body += chunk));
-    response.on('end', () => {
-      try {
-        const data = JSON.parse(body);
-        const latestVersion = data.version;
-        console.log(`Latest version: ${latestVersion}, Current version: ${currentVersion}`);
-
-        lastUpdateCheck = Date.now();
-        
-        settings.set('lastUpdateCheck', lastUpdateCheck);
-
-        if (compareVersions(latestVersion, currentVersion) === 1) {
-          showUpdateWindow(latestVersion);
-        }
-      } catch (error) {
-        console.error('Error parsing latest version:', error);
-      }
-    });
-  });
-  
-  request.on('error', (error) => {
-    clearTimeout(timeoutId);
-    console.error('Error checking for updates:', error);
-    
-    if (retryCount < maxRetries) {
-      const backoffTime = Math.pow(2, retryCount) * 3000; // Exponential backoff
-      console.log(`Retrying update check after ${backoffTime}ms (attempt ${retryCount + 1}/${maxRetries})`);
-      setTimeout(() => performUpdateCheck(currentVersion, retryCount + 1), backoffTime);
-    }
-  });
-  
-  request.end();
-}
-
-function compareVersions(v1, v2) {
-  const parts1 = v1.split('.').map(Number);
-  const parts2 = v2.split('.').map(Number);
-
-  for (let i = 0; i < Math.max(parts1.length, parts2.length); i++) {
-    const part1 = parts1[i] || 0;
-    const part2 = parts2[i] || 0;
-
-    if (part1 > part2) return 1;
-    if (part1 < part2) return -1;
-  }
-  return 0;
-}
-
-function showUpdateWindow(latestVersion) {
-  if (updateWindow) return;
-
-  updateWindow = new BrowserWindow({
-    width: 550,
-    height: 520,
-    parent: mainWindow,
-    modal: true,
-    show: false,
-    frame: false,
-    resizable: false,
-    webPreferences: {
-      preload: path.join(__dirname, 'src', 'js', 'preload', 'preload_update.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      disableBlinkFeatures: 'Accelerated2dCanvas'
-    },
-  });
-
-  updateWindow.loadFile('update.html');
-
-  updateWindow.once('ready-to-show', () => {
-    updateWindow.webContents.send('latest-version', latestVersion);
-    updateWindow.show();
-  });
-
-  updateWindow.on('closed', () => {
-    updateWindow = null;
-  });
-}
-
 function detachAllShortcuts() {
   if (shortcutsRegistered) {
     globalShortcut.unregisterAll();
@@ -1776,13 +1602,6 @@ ipcMain.on('open-external-link', (event, url) => {
   }
 });
 
-ipcMain.on('close-update-window', () => {
-  if (updateWindow) {
-    updateWindow.close();
-    updateWindow = null;
-  }
-});
-
 ipcMain.on('perform-prefix-search', (event, data) => {
   if (prefixSearchWindow && !prefixSearchWindow.isDestroyed()) {
     prefixSearchWindow.close();
@@ -1812,42 +1631,6 @@ ipcMain.on('close-prefix-search', () => {
       clipboard.writeText(originalClipboardContent);
     }, 500);
   }
-});
-
-ipcMain.on('mark-notification-read', (event, id) => {
-  notificationManager.markAsRead(id);
-});
-
-ipcMain.on('delete-notification', (event, id) => {
-  notificationManager.deleteNotification(id);
-});
-
-ipcMain.on('mark-all-notifications-read', () => {
-  notificationManager.markAllAsRead();
-});
-
-ipcMain.on('close-notification-panel', () => {
-  if (notificationManager.panelWindow) {
-    notificationManager.closePanelWindow();
-  }
-});
-
-ipcMain.on('close-notification', () => {
-  if (notificationManager.notificationWindow) {
-    notificationManager.closeNotificationWindow();
-  }
-});
-
-
-ipcMain.handle('get-notification-content', async (event, id, fromPanel = false) => {
-  if (notificationManager) {
-    if (fromPanel) {
-      return await notificationManager.getRealTimeContent(id);
-    } else {
-      return await notificationManager.getNotificationContent(id);
-    }
-  }
-  return null;
 });
 
 ipcMain.on('perform-quick-search', (event, searchText) => {
@@ -1957,14 +1740,29 @@ ipcMain.on('close-settings', () => {
 
 configureAppForBetterPerformance();
 
+// The default user agent advertises "SimplexityAI/x" and "Electron/x" to every
+// site; drop both so requests look like the Chrome build Electron ships.
+app.userAgentFallback = app.userAgentFallback.replace(/ (SimplexityAI|Electron)\/\S+/g, '');
+
 app.whenReady().then(() => {
   app.setAboutPanelOptions({ applicationName: APP_DISPLAY_NAME });
-  // count.perplexity.ai is a beacon iframe that already fails on X-Frame-Options;
-  // blocking it skips the error page and the renderer it would spawn. Perplexity's
-  // service worker is NOT blocked: it delivers notifications (push ->
-  // showNotification) and serves cached assets, and blocking it broke both.
+  // Analytics and tracking the page sends on its own, none of which the app
+  // needs (measured while logged in): Perplexity's usage events and its count
+  // beacon (an iframe that also spawned its own renderer), Datadog session
+  // recording, Singular ad attribution and Cloudflare's analytics beacon.
+  // Perplexity's service worker is NOT blocked: it delivers notifications
+  // (push -> showNotification) and serves cached assets, and blocking it broke both.
   session.defaultSession.webRequest.onBeforeRequest(
-    { urls: ['*://count.perplexity.ai/*'] },
+    {
+      urls: [
+        '*://count.perplexity.ai/*',
+        '*://r2cdn.perplexity.ai/js/count/*',
+        '*://www.perplexity.ai/rest/event/analytics*',
+        '*://browser-intake-datadoghq.com/*',
+        '*://*.singular.net/*',
+        '*://static.cloudflareinsights.com/*',
+      ],
+    },
     (_details, callback) => callback({ cancel: true })
   );
 
@@ -2008,7 +1806,6 @@ app.whenReady().then(() => {
   // A packaged build takes its Dock icon from the bundle's .icns, which macOS can
   // restyle; `npm start` runs the stock Electron.app, so show ours there too.
   if (isMac && !app.isPackaged) app.dock.setIcon(path.join(__dirname, 'assets', 'icons', 'png', 'favicon.png'));
-  lastUpdateCheck = settings.get('lastUpdateCheck', 0);
   
   if (!app.requestSingleInstanceLock()) {
     app.quit();
