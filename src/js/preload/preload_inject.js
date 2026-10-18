@@ -457,10 +457,11 @@ window.addEventListener('DOMContentLoaded', () => {
     // here, where forced 500s and dropped connections on the thread and answer
     // calls were all retried by Perplexity itself). The answer is safe on the
     // server and reopening the thread showed it, so reload the thread once the
-    // error has stayed up a few seconds. Each one goes to page-errors.log so the
-    // cause can be traced next time. /search/new/ pages are left alone: they
-    // have no thread address yet, and reloading one lands on the home page.
-    const THREAD_ERROR_GRACE_MS = 3000;
+    // error has stayed up 1.5 s (Perplexity's own retries clear it sooner).
+    // Each one goes to page-errors.log with the API calls that failed around it,
+    // so the cause can be traced. /search/new/ pages are left alone: they have
+    // no thread address yet, and reloading one lands on the home page.
+    const THREAD_ERROR_GRACE_MS = 1500;
     let threadErrorTimer = null;
     function threadError() {
         if (!/^\/search\/(?!new\/)./.test(location.pathname)) return '';

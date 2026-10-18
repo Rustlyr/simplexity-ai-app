@@ -1592,9 +1592,16 @@ ipcMain.on('set-settings', (event, data) => {
 
 // preload_inject.js reports a thread that dropped to Perplexity's error page
 // before it reloads it; kept on this Mac only, next to slow-requests.log.
+// The Perplexity API calls that failed in the last two minutes go in with it,
+// so the log shows what broke (the banner itself carries no error code).
+const API_FAILURE_WINDOW_MS = 2 * 60 * 1000;
+const recentApiFailures = []; // [time, "status-or-error path"]
 ipcMain.on('page-error', (_event, line) => {
   const text = String(line).replace(/\s+/g, ' ').slice(0, 300);
-  fs.appendFile(path.join(app.getPath('userData'), 'page-errors.log'), `${new Date().toISOString()}  ${text}\n`, () => {});
+  const since = Date.now() - API_FAILURE_WINDOW_MS;
+  const failures = recentApiFailures.filter(([time]) => time >= since)
+    .map(([time, what]) => `    ${Math.round((Date.now() - time) / 1000)}s before: ${what}\n`).join('') || '    no failed API calls in the last 2 min\n';
+  fs.appendFile(path.join(app.getPath('userData'), 'page-errors.log'), `${new Date().toISOString()}  ${text}\n${failures}`, () => {});
 });
 
 // The sidebar injector in preload_inject.js asks for this on every page load.
@@ -1861,6 +1868,14 @@ app.whenReady().then(() => {
   session.defaultSession.webRequest.onSendHeaders(api, (details) => { started.set(details.id, details.timestamp); });
   const apiEnded = (details) => {
     answerEnded(details);
+    // Blocked trackers and the answer stream the page closes itself are not failures.
+    // onCompleted also carries an error field ("net::OK"), so go by the status when there is one.
+    const failed = details.statusCode ? details.statusCode >= 400
+      : !/BLOCKED_BY_CLIENT/.test(details.error) && !(details.error === 'net::ERR_ABORTED' && details.url.includes('/rest/sse/'));
+    if (failed) {
+      recentApiFailures.push([Date.now(), `${details.statusCode || details.error} ${details.method} ${details.url.split('?')[0].replace('https://www.perplexity.ai', '')}`]);
+      if (recentApiFailures.length > 50) recentApiFailures.shift();
+    }
     const start = started.get(details.id);
     started.delete(details.id);
     // The answer stream stays open while the answer is written; it is slow by design.
