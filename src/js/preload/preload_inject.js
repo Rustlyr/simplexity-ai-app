@@ -427,6 +427,7 @@ window.addEventListener('DOMContentLoaded', () => {
                 syncSidebarLinks();
                 watchRoute();
                 addClearUnpinned();
+                paintShellCode();
                 if (!projectsWarmed && performance.now() > WARM_AFTER_MS) warmProjects();
             }
         }, 250);
@@ -550,6 +551,66 @@ window.addEventListener('DOMContentLoaded', () => {
 
     function refreshProjectIcons() {
         paintProjectIcons().catch((err) => console.warn('[simplex] project icons:', err.message));
+    }
+
+    // PowerShell, cmd and plain shell blocks came out one grey: Perplexity's
+    // Prism grammar marks almost nothing in a line like `.\tool.exe --help`, and
+    // its theme does not colour what it does mark. Such blocks are coloured
+    // with the CSS Custom Highlight API, which paints text ranges without
+    // adding elements, so React's tree and copied text stay untouched. Blocks
+    // Prism already coloured (inline colour styles) are left alone.
+    const SHELL_LANGS = /^(powershell|pwsh|ps1?|cmd|bat|batch|dos|shell|sh|bash|zsh|console|shellsession|terminal)$/;
+    const SHELL_TOKENS = [
+        ['simplex-com', /(?<=^|\s)(?:#|REM\s|::).*$/],
+        ['simplex-str', /"(?:[^"\\`]|[\\`].)*"|'[^'\n]*'/],
+        ['simplex-var', /\$\{[^}\n]*\}|\$(?:env:)?[A-Za-z_][\w:]*|\$[?_$]|%[A-Za-z_]\w*%/],
+        ['simplex-param', /(?<=^|\s)--?[A-Za-z][\w-]*/],
+        ['simplex-kw', /\b(?:if|elseif|else|foreach|for|while|do|until|switch|function|param|return|try|catch|finally|throw|begin|process|end|in|then|fi|done|case|esac|export|local)\b/],
+        ['simplex-num', /\b\d+(?:\.\d+)?\b/],
+        // The command: the first word of a line or of a pipeline step.
+        ['simplex-cmd', /(?<=^[ \t]*|[|;&{(][ \t]*)(?:\.{1,2}[\\/])?[\w.:\\/-]*[\w-]/],
+    ];
+    const SHELL_RE = new RegExp(SHELL_TOKENS.map(([, re]) => `(${re.source})`).join('|'), 'gm');
+    let shellSignature = '';
+
+    function paintShellCode() {
+        if (!window.CSS || !CSS.highlights || typeof Highlight !== 'function') return;
+        const blocks = [];
+        for (const pre of document.querySelectorAll('pre')) {
+            const label = pre.querySelector('figcaption > span');
+            const code = pre.querySelector('code');
+            if (!label || !code || !SHELL_LANGS.test(label.textContent.trim().toLowerCase())) continue;
+            if (code.querySelector('span[style*="color"]')) continue;
+            blocks.push(code);
+        }
+        const signature = blocks.map((code) => code.textContent.length).join(',');
+        if (signature === shellSignature) return;
+        shellSignature = signature;
+
+        const ranges = Object.fromEntries(SHELL_TOKENS.map(([name]) => [name, []]));
+        for (const code of blocks) {
+            const nodes = [];
+            let text = '';
+            const walker = document.createTreeWalker(code, NodeFilter.SHOW_TEXT);
+            for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+                nodes.push({ node, start: text.length });
+                text += node.data;
+            }
+            const at = (offset) => {
+                let i = nodes.length - 1;
+                while (i > 0 && nodes[i].start > offset) i--;
+                return [nodes[i].node, offset - nodes[i].start];
+            };
+            for (const match of text.matchAll(SHELL_RE)) {
+                if (!match[0]) continue;
+                const group = match.slice(1).findIndex((g) => g !== undefined);
+                const range = new Range();
+                range.setStart(...at(match.index));
+                range.setEnd(...at(match.index + match[0].length));
+                ranges[SHELL_TOKENS[group][0]].push(range);
+            }
+        }
+        for (const [name, list] of Object.entries(ranges)) CSS.highlights.set(name, new Highlight(...list));
     }
 
     // Library: "Clear unpinned" deletes every session except pinned ones, so

@@ -1,8 +1,7 @@
 /* styles.css */
 
 /* Tokens. "Ink": a flat graphite bar in the same colour as the page, no
-   glass, glow or shadow. The selected tab is a quiet fill with a brass
-   underline, the one accent colour, used only to mark where you are. */
+   glass, glow, shadow or accent colour. The selected tab is a quiet fill. */
 :root {
   --tabbar-height: 44px; /* must match TAB_BAR_HEIGHT in main.js */
   --traffic-lights-inset: 86px;
@@ -26,9 +25,8 @@
   --color-pressed: oklch(92% 0.006 90 / 0.1);
   --color-tab-on: oklch(23% 0.004 260);
   --color-rule: oklch(30% 0.004 260);
-  --color-accent: oklch(78% 0.11 75);
   --color-warning: #ffb340;
-  --color-focus: oklch(78% 0.11 75);
+  --color-focus: oklch(92% 0.006 90 / 0.5);
 
   --duration-fast: 150ms;
   --duration-spin: 800ms;
@@ -45,9 +43,8 @@
     --color-pressed: oklch(22% 0.006 260 / 0.09);
     --color-tab-on: oklch(93% 0.006 90);
     --color-rule: oklch(88% 0.006 90);
-    --color-accent: oklch(55% 0.12 70);
     --color-warning: #c45f00;
-    --color-focus: oklch(55% 0.12 70);
+    --color-focus: oklch(22% 0.006 260 / 0.5);
   }
 }
 
@@ -164,11 +161,10 @@ body.platform-mac.fullscreen #tabbar {
   background-color: var(--color-pressed);
 }
 
-/* The selected tab: a quiet fill and a brass underline. */
+/* The selected tab: a quiet fill, nothing else. */
 .tab.active {
   color: var(--color-text);
   background-color: var(--color-tab-on);
-  box-shadow: inset 0 -2px 0 var(--color-accent);
 }
 
 .tab:focus-visible {

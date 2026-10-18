@@ -935,12 +935,17 @@ function focusComposer() {
 // filled with the text colour, so it has no tile and follows light and dark.
 let appGlyphDataUrl = null;
 // "Ink": graphite and warm ink instead of Perplexity's palette, hairlines
-// instead of shadows, one brass accent for focus and selection. Perplexity
+// instead of shadows, no accent colour anywhere. Perplexity
 // derives every surface, text and border colour from a few base colours
 // (--odin-dark-100/200/1000; light: --odin-light-0/100/1000 and
 // --shiva-light-900), so replacing those restyles the
 // whole page without touching its DOM; fonts are left as they are. The
-// Computer mode button and "Add your team" are hidden.
+// Computer mode button and "Add your team" are hidden. Shell code blocks get
+// colours through ::highlight (painted by preload_inject.js), GitHub's palette.
+// No blanket prefers-reduced-motion rule: a universal * rule with
+// transition/animation overrides made style recalculation ~20x slower on
+// every navigation (measured 2,786 ms vs 128 ms over 10 project clicks with
+// Reduce Motion on), which was the jank when opening projects.
 const INK_CSS = `
 html:root {
   --odin-dark-100: oklch(17% 0.004 260);
@@ -952,7 +957,6 @@ html:root {
   --shiva-light-900: oklch(22% 0.006 260);
 }
 html[data-color-scheme][data-color-scheme] {
-  --ink-accent: oklch(55% 0.12 70);
   --shadow-inner-sm: inset 0 0 0 1px var(--border-soft);
   --shadow-sm-idle: 0 0 0 1px var(--border-soft);
   --shadow-sm-hover: 0 0 0 1px var(--border-base);
@@ -963,16 +967,21 @@ html[data-color-scheme][data-color-scheme] {
   --shadow-lg: 0 0 0 1px var(--border-base);
   --shadow-xl: 0 0 0 1px var(--border-base);
 }
-html[data-color-scheme="dark"][data-color-scheme] { --ink-accent: oklch(78% 0.11 75); }
-::selection { background: color-mix(in oklch, var(--ink-accent) 35%, transparent); }
-[contenteditable="true"], textarea, input { caret-color: var(--ink-accent); }
-:focus-visible { outline-color: var(--ink-accent); }
+::highlight(simplex-cmd) { color: #d2a8ff; }
+::highlight(simplex-kw) { color: #ff7b72; }
+::highlight(simplex-str) { color: #a5d6ff; }
+::highlight(simplex-var) { color: #ffa657; }
+::highlight(simplex-param), ::highlight(simplex-num) { color: #79c0ff; }
+::highlight(simplex-com) { color: #8b949e; }
+html[data-color-scheme="light"] ::highlight(simplex-cmd) { color: #8250df; }
+html[data-color-scheme="light"] ::highlight(simplex-kw) { color: #cf222e; }
+html[data-color-scheme="light"] ::highlight(simplex-str) { color: #0a3069; }
+html[data-color-scheme="light"] ::highlight(simplex-var) { color: #953800; }
+html[data-color-scheme="light"] ::highlight(simplex-param), html[data-color-scheme="light"] ::highlight(simplex-num) { color: #0550ae; }
+html[data-color-scheme="light"] ::highlight(simplex-com) { color: #6e7781; }
 button:has(use[*|href="#pplx-icon-custom-computer"]),
 span:has(> span > span > button use[*|href="#pplx-icon-custom-computer"]),
-nav button:has(use[*|href="#pplx-icon-user-plus"]) { display: none !important; }
-@media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
-}`;
+nav button:has(use[*|href="#pplx-icon-user-plus"]) { display: none !important; }`;
 
 function pageCSS() {
   appGlyphDataUrl = appGlyphDataUrl || nativeImage
@@ -1794,6 +1803,10 @@ app.whenReady().then(() => {
   // needs (measured while logged in): Perplexity's usage events and its count
   // beacon (an iframe that also spawned its own renderer), Datadog session
   // recording, Singular ad attribution and Cloudflare's analytics beacon.
+  // Source favicons come from Google, which tells Google every site an answer
+  // cites; without them Perplexity shows its own globe icon. Eppo (feature
+  // flags) is NOT blocked: it only downloads config, and blocking it can
+  // silently switch Perplexity features off.
   // Perplexity's service worker is NOT blocked: it delivers notifications
   // (push -> showNotification) and serves cached assets, and blocking it broke both.
   session.defaultSession.webRequest.onBeforeRequest(
@@ -1805,6 +1818,8 @@ app.whenReady().then(() => {
         '*://browser-intake-datadoghq.com/*',
         '*://*.singular.net/*',
         '*://static.cloudflareinsights.com/*',
+        '*://www.google.com/s2/favicons*',
+        '*://*.gstatic.com/faviconV2*',
       ],
     },
     (_details, callback) => {
