@@ -1317,17 +1317,12 @@ function switchView(target) {
       // The page owns focus from here; without this the main window's renderer keeps it.
       if (views[activeTabId] === viewRef) setTimeout(focusComposer, 150);
 
+      // No DOM removal here: React throws when it next updates a node someone
+      // else deleted, and Perplexity's error boundary then blanks the page. The
+      // old nag-screen selectors risked exactly that ('div.flex.items-center.gap-sm'
+      // is a common layout class) and matched no nag screen on current Perplexity.
       viewRef.webContents.executeJavaScript(`
-        (function removeNagScreens() {
-          const nagScreenSelectors = [
-            'div.max-w-\\\\[400px\\\\].rounded-xl',
-            'div.rounded-lg.p-md.animate-in.fade-in',
-            'div.flex.items-center.gap-sm',
-          ];
-          nagScreenSelectors.forEach((selector) => {
-            document.querySelectorAll(selector).forEach((el) => el.remove());
-          });
-
+        (function () {
           // Add CSS to optimize rendering performance
           const style = document.createElement('style');
           style.textContent = 'img { will-change: auto !important; } .will-change-transform { will-change: auto !important; }';
@@ -1593,6 +1588,13 @@ ipcMain.on('set-settings', (event, data) => {
   }
 
   reattachShortcuts();
+});
+
+// preload_inject.js reports a thread that dropped to Perplexity's error page
+// before it reloads it; kept on this Mac only, next to slow-requests.log.
+ipcMain.on('page-error', (_event, line) => {
+  const text = String(line).replace(/\s+/g, ' ').slice(0, 300);
+  fs.appendFile(path.join(app.getPath('userData'), 'page-errors.log'), `${new Date().toISOString()}  ${text}\n`, () => {});
 });
 
 // The sidebar injector in preload_inject.js asks for this on every page load.

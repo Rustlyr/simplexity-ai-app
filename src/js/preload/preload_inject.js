@@ -428,6 +428,8 @@ window.addEventListener('DOMContentLoaded', () => {
                 watchRoute();
                 addClearUnpinned();
                 paintShellCode();
+                checkThreadError();
+                tidyNewThreadTitle();
                 if (!projectsWarmed && performance.now() > WARM_AFTER_MS) warmProjects();
             }
         }, 250);
@@ -447,7 +449,33 @@ window.addEventListener('DOMContentLoaded', () => {
         // Project pages are where an icon gets changed.
         if (/^\/(projects|spaces)\//.test(path)) refreshProjectIcons();
         if (FINANCE_TAB_PATH.test(path)) localStorage.setItem(FINANCE_KEY, path);
-        setTimeout(() => { if (location.pathname === path && projectsLookBroken()) reloadOnce(); }, RECHECK_AFTER_MS);
+        setTimeout(() => { if (location.pathname === path && projectsLookBroken()) reloadOnce('project page did not render'); }, RECHECK_AFTER_MS);
+    }
+
+    // A thread sometimes drops to a blank page with Perplexity's "Sorry,
+    // something went wrong" while chatting (seen by the user; not reproduced
+    // here, where forced 500s and dropped connections on the thread and answer
+    // calls were all retried by Perplexity itself). The answer is safe on the
+    // server and reopening the thread showed it, so reload the thread once the
+    // error has stayed up a few seconds. Each one goes to page-errors.log so the
+    // cause can be traced next time. /search/new/ pages are left alone: they
+    // have no thread address yet, and reloading one lands on the home page.
+    const THREAD_ERROR_GRACE_MS = 3000;
+    let threadErrorTimer = null;
+    function threadError() {
+        if (!/^\/search\/(?!new\/)./.test(location.pathname)) return '';
+        const alert = document.querySelector('main [role="alert"].bg-negative-strong');
+        return alert ? alert.innerText.replace(/\s+/g, ' ').trim() : '';
+    }
+    function checkThreadError() {
+        if (threadErrorTimer || !threadError()) return;
+        threadErrorTimer = setTimeout(() => {
+            threadErrorTimer = null;
+            const text = threadError();
+            if (!text) return; // Perplexity recovered by itself
+            ipcRenderer.send('page-error', `${location.pathname}  ${text}`);
+            reloadOnce('thread error: ' + text);
+        }, THREAD_ERROR_GRACE_MS);
     }
 
     function projectsLookBroken() {
@@ -458,7 +486,7 @@ window.addEventListener('DOMContentLoaded', () => {
         return !!(nav && /No projects/.test(nav.textContent) && main.querySelector('a[href^="/spaces/"]'));
     }
 
-    function reloadOnce() {
+    function reloadOnce(reason) {
         try {
             const last = Number(sessionStorage.getItem('simplex-auto-reload') || 0);
             if (Date.now() - last < 60000) return;
@@ -466,7 +494,7 @@ window.addEventListener('DOMContentLoaded', () => {
         } catch {
             return; // without the guard a reload could repeat; leave the page as it is
         }
-        console.warn('[simplex] project page did not render; reloading');
+        console.warn(`[simplex] ${reason}; reloading`);
         location.reload();
     }
 
@@ -701,6 +729,69 @@ window.addEventListener('DOMContentLoaded', () => {
             button.disabled = false;
             label.textContent = idle;
         }
+    }
+
+    // Perplexity names a chat after its whole first question, so a pasted post
+    // or web page becomes a title like "Skip to content SUBMIT A JOB Home…".
+    // When a chat started in this window has its first answer, it gets a short
+    // title cut from that question: no leading emoji or markers ("BREAKING:",
+    // "Skip to content"), no GitHub page chrome, first sentence only, at most
+    // TITLE_MAX characters ending on a whole word. It is renamed the way
+    // Perplexity's own Rename does it, and only while the title is still the
+    // question itself, so a name the user picked is never touched.
+    // ponytail: a cut, not a summary; a real summary needs a language model
+    // the app does not have (Apple's on-device one has no Thai).
+    const TITLE_MAX = 60;
+    const TITLE_WAIT_MS = 5 * 60 * 1000;
+    let newThreadSeen = false;
+    const titledSlugs = new Set();
+
+    function shortTitle(question) {
+        let t = (question.split('\n').map((line) => line.trim()).find(Boolean) || '')
+            .replace(/^\W*skip to (main )?content\s*/iu, '')
+            .replace(/\s+(Repository navigation|Navigation Menu)\b.*$/iu, '')
+            .replace(/^[^\p{L}\p{N}]+/u, '')
+            .replace(/^(breaking( news)?|just in|update|alert)\s*[:\-–—]\s*/iu, '')
+            .replace(/^[^\p{L}\p{N}]+/u, '');
+        const sentence = t.match(/^(.{12,}?[.!?。])(\s|$)/u);
+        if (sentence) t = sentence[1];
+        t = t.replace(/[.。]$/u, '').trim();
+        if (t.length <= TITLE_MAX) return t;
+        // Cut on a word boundary; Intl.Segmenter also finds Thai word breaks.
+        let cut = '';
+        for (const { segment } of new Intl.Segmenter(undefined, { granularity: 'word' }).segment(t)) {
+            if ((cut + segment).length > TITLE_MAX - 1) break;
+            cut += segment;
+        }
+        return cut.replace(/[^\p{L}\p{N}\p{M})]+$/u, '') + '…';
+    }
+
+    function tidyNewThreadTitle() {
+        const path = location.pathname;
+        if (path.startsWith('/search/new/')) { newThreadSeen = true; return; }
+        const slug = (path.match(/^\/search\/([^/]+)$/) || [])[1];
+        if (!slug || !newThreadSeen || titledSlugs.has(slug)) return;
+        newThreadSeen = false;
+        titledSlugs.add(slug);
+        renameWhenAnswered(slug, Date.now()).catch((err) => console.warn('[simplex] chat title:', err.message));
+    }
+
+    async function renameWhenAnswered(slug, since) {
+        const thread = await getJson(`/rest/thread/${slug}?${API}&limit=1&offset=0&from_first=true`);
+        const entry = (thread.entries || [])[0];
+        if (!entry) return;
+        if (entry.status !== 'completed') {
+            if (Date.now() - since < TITLE_WAIT_MS) setTimeout(() => renameWhenAnswered(slug, since).catch(() => {}), 4000);
+            return;
+        }
+        const current = (entry.thread_title || '').trim();
+        if (current !== (entry.query_str || '').trim()) return; // already renamed
+        const title = shortTitle(current);
+        if (!title || title === current) return;
+        await getJson('/rest/thread/set_thread_title?' + API, {
+            method: 'POST', headers: JSON_HEADERS,
+            body: JSON.stringify({ context_uuid: entry.context_uuid, title, read_write_token: entry.read_write_token }),
+        });
     }
 
     function addClearUnpinned() {
