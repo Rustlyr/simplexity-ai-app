@@ -282,6 +282,56 @@ window.addEventListener('DOMContentLoaded', () => {
     const PLAIN_PASTE_FROM = 5000;
     const replayed = new WeakSet();
 
+    // Code in a rich paste (a blog post, a GitHub page, an answer) arrives as
+    // bare lines, so the question shows it as prose, with the page's language
+    // label ("json") as a line of its own. A question bubble does draw a
+    // Markdown fence as a code block with its language, so each <pre> of the
+    // pasted HTML is put back into the plain text as a ```lang fence and the
+    // label line above it is dropped. Returns null when there is no code.
+    const LANG = /^[\w#+.-]{1,20}$/;
+    // A bare word above the code counts as its label only if it names a language.
+    const LANG_NAMES = /^(json|jsonc?|js|javascript|ts|typescript|jsx|tsx|python|py|bash|sh|shell|zsh|fish|powershell|pwsh|ps1|cmd|bat|batch|c|cpp|c\+\+|cs|csharp|c#|go|golang|rust|rs|java|kotlin|kt|swift|objc|ruby|rb|php|sql|html|css|scss|xml|yaml|yml|toml|ini|conf|md|markdown|diff|patch|dockerfile|docker|lua|r|perl|dart|scala|elixir|haskell|text|txt|plaintext|console|terminal|http|graphql|nginx|makefile|vim|regex|csv|env|hcl|terraform|solidity|asm|nasm)$/i;
+    function codeLanguage(pre) {
+        for (let el = pre.querySelector('code') || pre, depth = 0; el && depth < 4; el = el.parentElement, depth++) {
+            const named = (el.className && String(el.className).match(/(?:language|lang|highlight-source)-([\w#+.-]+)/))
+                || [, el.getAttribute && (el.getAttribute('data-language') || el.getAttribute('data-lang'))];
+            if (named[1] && LANG.test(named[1])) return named[1].toLowerCase();
+        }
+        const caption = pre.querySelector('figcaption');
+        if (caption && LANG.test(caption.textContent.trim())) return caption.textContent.trim().toLowerCase();
+        return '';
+    }
+
+    function fenceCode(html, text) {
+        const tpl = document.createElement('template');
+        tpl.innerHTML = html; // inert: nothing in it loads or runs
+        let out = text;
+        let from = 0;
+        let changed = false;
+        for (const pre of tpl.content.querySelectorAll('pre')) {
+            const code = (pre.querySelector('code') || pre).textContent.replace(/\n+$/, '');
+            if (!code.trim()) continue;
+            const at = out.indexOf(code, from);
+            if (at < 0) continue; // the plain text differs from the HTML here; leave it as it is
+            // The label is the text just before the code: on the line above, or
+            // run into the code's first line when the page had no line break.
+            const lineStart = out.lastIndexOf('\n', at - 1) + 1;
+            const labelStart = at > lineStart ? lineStart : out.lastIndexOf('\n', lineStart - 2) + 1;
+            const label = out.slice(labelStart, at > lineStart ? at : lineStart).trim();
+            if (/^`{3,}/.test(label)) { from = at + code.length; continue; } // already fenced
+            const lang = codeLanguage(pre) || (LANG_NAMES.test(label) ? label.toLowerCase() : '');
+            const dropLabel = lang && label.toLowerCase() === lang;
+            const keepUpTo = dropLabel ? labelStart : at;
+            const lead = keepUpTo > 0 && out[keepUpTo - 1] !== '\n' ? '\n' : '';
+            const ticks = '`'.repeat(Math.max(3, ...(code.match(/`+/g) || []).map((run) => run.length + 1)));
+            const fenced = `${lead}${ticks}${lang}\n${code}\n${ticks}`;
+            out = out.slice(0, keepUpTo) + fenced + out.slice(at + code.length);
+            from = keepUpTo + fenced.length;
+            changed = true;
+        }
+        return changed ? out : null;
+    }
+
     if (isMain) {
         // Capture phase, so this runs before the editor's own paste handler.
         document.addEventListener('paste', (event) => {
@@ -303,11 +353,13 @@ window.addEventListener('DOMContentLoaded', () => {
                 return;
             }
 
-            if (text.length >= PLAIN_PASTE_FROM && data.types.includes('text/html')) {
+            const html = data.types.includes('text/html') ? data.getData('text/html') : '';
+            const fenced = html.includes('<pre') ? fenceCode(html, text) : null;
+            if (fenced || (html && text.length >= PLAIN_PASTE_FROM)) {
                 event.preventDefault();
                 event.stopImmediatePropagation();
                 const plain = new DataTransfer();
-                plain.setData('text/plain', text);
+                plain.setData('text/plain', fenced || text);
                 const again = new ClipboardEvent('paste', { clipboardData: plain, bubbles: true, cancelable: true });
                 replayed.add(again);
                 event.target.dispatchEvent(again);
