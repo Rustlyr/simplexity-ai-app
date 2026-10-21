@@ -58,9 +58,62 @@ if (location.hostname === 'www.perplexity.ai') {
                 }));
                 return new Response(body, { status: res.status, statusText: res.statusText, headers: res.headers });
             };
+            // News in Thai while the interface stays English. Perplexity picks the
+            // language of Discover stories from Accept-Language (measured: the
+            // feed, an article and its related pages come back translated, the
+            // Discover topic names too, so topics are left alone). Finance's story
+            // cards ignore it and stay English until opened, so each card's title
+            // and summary are swapped for the article's Thai ones, cached by uuid.
+            const NEWS_LANG = 'th-TH';
+            const TRANSLATED = /\/rest\/(discover\/feed|article\/|page\/get_related_pages)/;
+            const CACHE_KEY = 'simplex:news-th';
+            const cache = (() => { try { return JSON.parse(localStorage.getItem(CACHE_KEY)) || {}; } catch { return {}; } })();
+            const saveCache = () => {
+                const keys = Object.keys(cache);
+                for (const k of keys.slice(0, Math.max(0, keys.length - 500))) delete cache[k]; // oldest first
+                try { localStorage.setItem(CACHE_KEY, JSON.stringify(cache)); } catch {}
+            };
+            const inFlight = {};
+            const thaiCard = (item) => cache[item.uuid] ? Promise.resolve(cache[item.uuid]) : (inFlight[item.uuid] = inFlight[item.uuid]
+                || send(`/rest/article/${item.slug || item.uuid}?version=2.18&source=default`, { headers: { 'Accept-Language': NEWS_LANG } })
+                    .then((r) => r.json())
+                    .then((j) => {
+                        const info = j.entries?.[0]?.article_info;
+                        if (!info?.title) return null;
+                        cache[item.uuid] = { title: info.title, summary: info.summary || '' };
+                        saveCache();
+                        return cache[item.uuid];
+                    })
+                    .catch(() => null)
+                    .finally(() => delete inFlight[item.uuid]));
+            // Wait at most this long for misses; the rest finish in the background
+            // and are Thai from the cache on the next visit.
+            const CARD_WAIT_MS = 2500;
+            const translateCatalog = async (res) => {
+                if (!res.ok) return res;
+                let items;
+                try { items = await res.clone().json(); } catch { return res; }
+                if (!Array.isArray(items)) return res;
+                const done = Promise.all(items.map(async (item) => {
+                    if (item?.item_type !== 'pplx_page' || !item.uuid) return;
+                    const th = await thaiCard(item);
+                    if (!th) return;
+                    item.title = th.title;
+                    item.short_title = th.title;
+                    if (th.summary) item.summary = th.summary;
+                }));
+                await Promise.race([done, new Promise((r) => setTimeout(r, CARD_WAIT_MS))]);
+                return new Response(JSON.stringify(items), { status: res.status, statusText: res.statusText, headers: res.headers });
+            };
             window.fetch = async function (input, init) {
                 // The ask call passes a URL object; a Request carries .url.
                 const url = input instanceof Request ? input.url : String(input);
+                if (TRANSLATED.test(url)) {
+                    const headers = new Headers(init?.headers || (input instanceof Request ? input.headers : undefined));
+                    headers.set('Accept-Language', NEWS_LANG);
+                    return send.call(this, input, { ...init, headers });
+                }
+                if (url.includes('/rest/finance/discover-catalog/')) return translateCatalog(await send.call(this, input, init));
                 const route = routes.find(([re]) => new RegExp(re).test(location.pathname));
                 let project = null;
                 if (route && url.includes('/rest/sse/perplexity_ask') && init && typeof init.body === 'string') {
@@ -134,6 +187,15 @@ window.addEventListener('DOMContentLoaded', () => {
             const block = heading.parentElement && heading.parentElement.parentElement;
             if (block && !block.hasAttribute('data-simplex-market-summary') && heading.textContent.trim() === 'Market Summary') block.setAttribute('data-simplex-market-summary', '');
         }
+    }
+
+    // The Discover feed's right column (weather, Market Outlook, Trending
+    // Companies) is its only <aside>. Mark its grid so the stylesheet can drop
+    // the column and give the news the full width. Feed pages only, not articles.
+    function markDiscoverFeed() {
+        if (!/^\/discover(\/(?!you\/)[^/]*)?$/.test(location.pathname)) return;
+        const grid = document.querySelector('main aside')?.parentElement;
+        if (grid && !grid.hasAttribute('data-simplex-discover-feed')) grid.setAttribute('data-simplex-discover-feed', '');
     }
 
     const INJECTED_ATTR = 'data-simplexity-shortcut';
@@ -470,7 +532,10 @@ window.addEventListener('DOMContentLoaded', () => {
     const observer = new MutationObserver(() => {
         // Unbatched, so the block is hidden before it is ever painted (in the
         // 250 ms pass it showed for ~13 frames). A few h2 lookups, Finance only.
-        if (isMain) markMarketSummary();
+        if (isMain) {
+            markMarketSummary();
+            markDiscoverFeed();
+        }
         if (sweepPending) return;
         sweepPending = true;
         setTimeout(() => {

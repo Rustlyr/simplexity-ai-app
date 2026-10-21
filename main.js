@@ -1007,6 +1007,9 @@ function pageCSS() {
   if (!settings.get('showMarketSummary', false)) {
     css += '\n[data-simplex-market-summary] { display: none !important; }';
   }
+  // Discover is news only: no weather or stock column (marked by preload_inject.js).
+  css += '\n[data-simplex-discover-feed] { grid-template-columns: minmax(0, 1fr) !important; }';
+  css += '\n[data-simplex-discover-feed] > aside { display: none !important; }';
   return css;
 }
 
