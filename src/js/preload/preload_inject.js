@@ -105,13 +105,32 @@ if (location.hostname === 'www.perplexity.ai') {
                 await Promise.race([done, new Promise((r) => setTimeout(r, CARD_WAIT_MS))]);
                 return new Response(JSON.stringify(items), { status: res.status, statusText: res.statusText, headers: res.headers });
             };
+            // Perplexity's topic feeds keep stories for months (measured: Sports'
+            // newest was 12 days old, Arts' median 100 days, Top's 9.6). Drop
+            // anything older than a week; a page with nothing fresh ends the feed,
+            // so infinite scroll does not keep fetching pages of old news.
+            const MAX_STORY_AGE_MS = 7 * 86400000;
+            const freshFeed = async (res) => {
+                if (!res.ok) return res;
+                let feed;
+                try { feed = await res.clone().json(); } catch { return res; }
+                if (!Array.isArray(feed.items)) return res;
+                // updated_datetime comes without a zone; it is UTC.
+                const age = (s) => Date.now() - Date.parse(/(Z|[+-]\d\d:?\d\d)$/.test(s) ? s : s + 'Z');
+                const fresh = feed.items.filter((x) => !x.updated_datetime || age(x.updated_datetime) < MAX_STORY_AGE_MS);
+                if (fresh.length === feed.items.length) return res;
+                feed.items = fresh;
+                if (!fresh.length) feed.next_token = null;
+                return new Response(JSON.stringify(feed), { status: res.status, statusText: res.statusText, headers: res.headers });
+            };
             window.fetch = async function (input, init) {
                 // The ask call passes a URL object; a Request carries .url.
                 const url = input instanceof Request ? input.url : String(input);
                 if (TRANSLATED.test(url)) {
                     const headers = new Headers(init?.headers || (input instanceof Request ? input.headers : undefined));
                     headers.set('Accept-Language', NEWS_LANG);
-                    return send.call(this, input, { ...init, headers });
+                    const res = send.call(this, input, { ...init, headers });
+                    return url.includes('/rest/discover/feed') ? freshFeed(await res) : res;
                 }
                 if (url.includes('/rest/finance/discover-catalog/')) return translateCatalog(await send.call(this, input, init));
                 const route = routes.find(([re]) => new RegExp(re).test(location.pathname));
@@ -196,6 +215,210 @@ window.addEventListener('DOMContentLoaded', () => {
         if (!/^\/discover(\/(?!you\/)[^/]*)?$/.test(location.pathname)) return;
         const grid = document.querySelector('main aside')?.parentElement;
         if (grid && !grid.hasAttribute('data-simplex-discover-feed')) grid.setAttribute('data-simplex-discover-feed', '');
+    }
+
+    // Discover has no "latest" view and only five broad topics, and its Sports
+    // feed is stale (newest story 12 days old when measured) while For You and
+    // the other feeds carry fresh F1 and UFC stories. So the filter bar pools
+    // every feed Perplexity serves, keeps the past week, and lists it newest
+    // first, either all of it (Latest) or one sport. Perplexity's own feed
+    // stays underneath; clicking the active chip again goes back to it.
+    // Stories are matched on the slug, which stays English when titles are Thai.
+    const NEWS_FILTERS = [
+        { id: 'latest', label: 'Latest' },
+        { id: 'sports', label: 'Sports' },
+        { id: 'f1', label: 'F1', re: /\b(f1|formula (1|one)|grand prix|verstappen|hamilton|leclerc|norris|piastri|antonelli|russell|alonso|sainz|gasly|albon|tsunoda|hulkenberg|bortoleto|lawson|hadjar|bearman|colapinto|mclaren|red bull racing|fia)\b/ },
+        { id: 'mma', label: 'MMA', re: /\b(ufc|mma|bellator|pfl|octagon|chimaev|pereira|volkanovski|evloev|mcgregor|strickland|makhachev|topuria|ankalaev|du plessis|adesanya|aspinall|o ?malley|dvalishvili|holloway|poirier|gaethje)\b/ },
+        { id: 'boxing', label: 'Boxing', re: /\b(boxing|boxer|usyk|tyson fury|anthony joshua|canelo|crawford|inoue|bivol|beterbiev|haney|gervonta|jake paul|wbc|wba|ibf|wbo)\b/ },
+    ];
+    const OTHER_SPORTS = /\b(nba|nfl|nhl|mlb|wnba|premier league|la liga|serie a|bundesliga|champions league|uefa|fifa|world cup|soccer|football|tennis|atp|wta|wimbledon|golf|pga|liv golf|olympics?|cricket|rugby|motogp|nascar|indycar|super bowl|playoffs?)\b/;
+    const storyText = (x) => ((x.slug || '').replace(/-[A-Za-z0-9._]{20,}$/, '') + ' ' + (x.title || '')).replace(/[-_]/g, ' ').toLowerCase();
+    function storyMatches(filterId, x) {
+        if (filterId === 'latest') return true;
+        const text = storyText(x);
+        if (filterId === 'sports') return OTHER_SPORTS.test(text) || NEWS_FILTERS.some((f) => f.re && f.re.test(text));
+        return NEWS_FILTERS.find((f) => f.id === filterId).re.test(text);
+    }
+    const storyTime = (s) => Date.parse(/(Z|[+-]\d\d:?\d\d)$/.test(s) ? s : s + 'Z');
+
+    const NEWS_FEEDS = ['', 'top', '9be812cb-6120-41b7-bc9e-993200db6cfc', 'e46915e3-9d25-4f85-9e43-e8a9d834729f',
+        'c69c15fd-559e-4714-b82c-481a89b82a94', '0130fdd1-4017-43ac-91ae-59ace446130f', 'f00846db-e258-4455-9e9f-74b12cfbf06d'];
+    const NEWS_PAGES = 4;            // per feed, 20 stories each; offset paging works for every feed
+    const NEWS_POOL_TTL_MS = 5 * 60000;
+    const WEEK_MS = 7 * 86400000;
+    // All pages go out at once (21 calls take about as long as the slowest one),
+    // and a list redraws as each page lands, so the first stories show early.
+    let newsPool = null; // { at, stories: Map, pending, listeners: Set }
+    function startNewsPool() {
+        if (newsPool && (newsPool.pending || Date.now() - newsPool.at < NEWS_POOL_TTL_MS)) return newsPool;
+        const pool = newsPool = { at: Date.now(), stories: new Map(), pending: 0, listeners: new Set() };
+        for (const topic of NEWS_FEEDS) for (let p = 0; p < NEWS_PAGES; p++) {
+            pool.pending++;
+            fetch(`/rest/discover/feed?limit=20&offset=${p * 20}${topic ? '&topic=' + topic : ''}&${API}`,
+                { headers: { 'Accept-Language': 'th-TH' }, signal: AbortSignal.timeout(15000) })
+                .then((r) => (r.ok ? r.json() : {})).catch(() => ({}))
+                .then((j) => {
+                    for (const x of Array.isArray(j.items) ? j.items : []) {
+                        if (x.item_type !== 'pplx_page' || !x.slug || !x.updated_datetime || pool.stories.has(x.uuid)) continue;
+                        const t = storyTime(x.updated_datetime);
+                        if (Date.now() - t < WEEK_MS) pool.stories.set(x.uuid, { ...x, t });
+                    }
+                    pool.pending--;
+                    // Nothing came back at all: do not keep an empty pool for five minutes.
+                    if (!pool.pending && !pool.stories.size && newsPool === pool) newsPool = null;
+                    for (const f of pool.listeners) f();
+                });
+        }
+        return pool;
+    }
+
+    const ago = new Intl.RelativeTimeFormat('en', { numeric: 'auto', style: 'short' });
+    function timeAgo(t) {
+        const min = Math.round((Date.now() - t) / 60000);
+        if (min < 60) return ago.format(-Math.max(1, min), 'minute');
+        if (min < 48 * 60) return ago.format(-Math.round(min / 60), 'hour');
+        return ago.format(-Math.round(min / 1440), 'day');
+    }
+    const BREAKING_MS = 3 * 3600000;
+
+    let newsFilter = null;       // chip shown on this page, or null for Perplexity's feed
+    let newsFilterPath = null;   // the path the choice was made on
+    let newsRender = 0;          // drops a render that a newer click replaced
+    let newsPrefetch = null;
+    function el(tag, cls, text) {
+        const e = document.createElement(tag);
+        if (cls) e.className = cls;
+        if (text != null) e.textContent = text;
+        return e;
+    }
+    function newsRow(x) {
+        const a = el('a', 'simplex-news-row');
+        a.href = '/discover/you/' + x.slug;
+        a.addEventListener('click', (e) => {
+            if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+            e.preventDefault();
+            navigateInApp(a.getAttribute('href'));
+        });
+        const img = x.featured_images && x.featured_images[0];
+        const src = img && (img.thumbnail || img.image);
+        if (typeof src === 'string' && src.startsWith('https://')) {
+            const pic = el('img', 'simplex-news-img');
+            pic.loading = 'lazy';
+            pic.referrerPolicy = 'no-referrer';
+            pic.alt = '';
+            pic.src = src;
+            pic.addEventListener('error', () => pic.remove());
+            a.append(pic);
+        }
+        const body = el('div', 'simplex-news-body');
+        body.append(el('div', 'simplex-news-title', x.title || x.short_title || ''));
+        if (x.summary) body.append(el('div', 'simplex-news-summary', x.summary));
+        const meta = el('div', 'simplex-news-meta');
+        if (Date.now() - x.t < BREAKING_MS) meta.append(el('span', 'simplex-news-new', 'Breaking'));
+        meta.append(timeAgo(x.t));
+        body.append(meta);
+        a.append(body);
+        return a;
+    }
+    function renderNews(panel, filterId) {
+        const token = ++newsRender;
+        const pool = startNewsPool();
+        const label = NEWS_FILTERS.find((f) => f.id === filterId).label;
+        let shown = '';
+        let queued = false;
+        const draw = () => {
+            if (token !== newsRender) { pool.listeners.delete(onUpdate); return; }
+            queued = false;
+            const list = [...pool.stories.values()].filter((x) => storyMatches(filterId, x)).sort((a, b) => b.t - a.t).slice(0, 60);
+            const key = list.map((x) => x.uuid).join() + pool.pending;
+            if (key === shown) return;
+            shown = key;
+            const loading = pool.pending ? ' · loading more…' : '';
+            panel.replaceChildren(
+                el('div', 'simplex-news-head', `${label} · ${list.length} ${list.length === 1 ? 'story' : 'stories'} from the past week${loading}`),
+                ...(list.length ? list.map(newsRow)
+                    : [el('div', 'simplex-news-empty', pool.pending ? 'Loading…' : `No ${label} news in the past week.`)]));
+        };
+        // One redraw per frame however many pages land in it.
+        const onUpdate = () => { if (!queued) { queued = true; requestAnimationFrame(draw); } };
+        pool.listeners.add(onUpdate);
+        draw();
+    }
+
+    const NEWS_CSS = `
+        .simplex-news-chips { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 20px; }
+        .simplex-news-chip { font: inherit; font-size: 13px; padding: 5px 12px; border-radius: 999px; cursor: pointer;
+            color: inherit; background: transparent; border: 1px solid color-mix(in srgb, currentColor 18%, transparent); opacity: .75; }
+        .simplex-news-chip:hover { opacity: 1; }
+        .simplex-news-chip[aria-pressed="true"] { opacity: 1; background: color-mix(in srgb, currentColor 10%, transparent); border-color: color-mix(in srgb, currentColor 30%, transparent); }
+        [data-simplex-news-open] { display: none !important; }
+        .simplex-news-panel { display: flex; flex-direction: column; }
+        .simplex-news-head { font-size: 13px; opacity: .6; margin-bottom: 8px; }
+        .simplex-news-row { display: flex; gap: 16px; padding: 16px 0; color: inherit; text-decoration: none;
+            border-top: 1px solid color-mix(in srgb, currentColor 10%, transparent); }
+        .simplex-news-row:hover .simplex-news-title { text-decoration: underline; text-underline-offset: 3px; }
+        .simplex-news-img { width: 168px; height: 104px; object-fit: cover; border-radius: 8px; flex: none; }
+        .simplex-news-body { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+        .simplex-news-title { font-size: 17px; font-weight: 500; line-height: 1.4; }
+        .simplex-news-summary { font-size: 14px; line-height: 1.5; opacity: .7; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+        .simplex-news-meta { font-size: 12px; opacity: .55; display: flex; gap: 8px; align-items: center; }
+        .simplex-news-new { color: var(--decoration-pink-fg-primary, #dc6973); font-weight: 600; }
+        .simplex-news-empty { padding: 24px 0; opacity: .6; font-size: 14px; }`;
+
+    // Runs on every sweep: keeps the bar in front of Perplexity's feed grid
+    // (React may replace the grid) and the panel in step with the chosen chip.
+    function syncDiscoverNews() {
+        const grid = document.querySelector('[data-simplex-discover-feed]');
+        let bar = document.querySelector('.simplex-news-chips');
+        if (!grid || !/^\/discover(\/(?!you\/)[^/]*)?$/.test(location.pathname)) {
+            bar?.remove();
+            document.querySelector('.simplex-news-panel')?.remove();
+            return;
+        }
+        // Fetch ahead, so a chip shows its list at once (and Sports opens on it).
+        if (!newsPrefetch && (!newsPool || !newsPool.pending && Date.now() - newsPool.at > NEWS_POOL_TTL_MS)) newsPrefetch = setTimeout(() => { newsPrefetch = null; startNewsPool(); }, 1000);
+        if (newsFilterPath !== location.pathname) {
+            newsFilterPath = location.pathname;
+            // Perplexity's Sports feed is weeks old; open its tab on the fresh list.
+            newsFilter = location.pathname === '/discover/sports' ? 'sports' : null;
+        }
+        if (!document.getElementById('simplex-news-style')) {
+            const style = el('style', null, NEWS_CSS);
+            style.id = 'simplex-news-style';
+            document.head.append(style);
+        }
+        if (!bar) {
+            bar = el('div', 'simplex-news-chips');
+            bar.setAttribute('role', 'toolbar');
+            bar.setAttribute('aria-label', 'Filter news');
+            for (const f of NEWS_FILTERS) {
+                const chip = el('button', 'simplex-news-chip', f.label);
+                chip.type = 'button';
+                chip.dataset.filter = f.id;
+                chip.addEventListener('click', () => {
+                    newsFilter = newsFilter === f.id ? null : f.id;
+                    syncDiscoverNews();
+                });
+                bar.append(chip);
+            }
+        }
+        if (bar.nextElementSibling !== grid && grid.previousElementSibling?.className !== 'simplex-news-panel') grid.before(bar);
+        for (const chip of bar.children) chip.setAttribute('aria-pressed', String(chip.dataset.filter === newsFilter));
+
+        let panel = document.querySelector('.simplex-news-panel');
+        if (!newsFilter) {
+            panel?.remove();
+            grid.removeAttribute('data-simplex-news-open');
+            return;
+        }
+        if (!panel || panel.dataset.filter !== newsFilter) {
+            panel?.remove();
+            panel = el('div', 'simplex-news-panel');
+            panel.dataset.filter = newsFilter;
+            renderNews(panel, newsFilter);
+        }
+        if (panel.previousElementSibling !== bar) bar.after(panel);
+        grid.setAttribute('data-simplex-news-open', '');
     }
 
     const INJECTED_ATTR = 'data-simplexity-shortcut';
@@ -535,6 +758,7 @@ window.addEventListener('DOMContentLoaded', () => {
         if (isMain) {
             markMarketSummary();
             markDiscoverFeed();
+            syncDiscoverNews();
         }
         if (sweepPending) return;
         sweepPending = true;
@@ -624,11 +848,13 @@ window.addEventListener('DOMContentLoaded', () => {
     // Colour names map to theme tokens the way Perplexity's own picker does.
     const PROJECT_COLOR_TOKEN = { red: 'pink', amber: 'gold', pink: 'magenta', gray: 'neutral' };
     const API = 'version=2.18&source=default';
+    const ICON_TIMEOUT_MS = 10000;
     let projectIconStyle = null;
 
     async function paintProjectIcons() {
-        const list = await fetch('/rest/spaces/landing/v2?limit=100&ordered=true&' + API);
-        if (!list.ok) return;
+        // A dead connection would hold these forever; time out and let the retry below try again.
+        const list = await fetch('/rest/spaces/landing/v2?limit=100&ordered=true&' + API, { signal: AbortSignal.timeout(ICON_TIMEOUT_MS) });
+        if (!list.ok) throw new Error('project list ' + list.status);
         const projects = Object.values((await list.json()).sections || {})
             .flatMap((section) => section.items || [])
             .filter((p) => /^[0-9a-f-]{36}$/.test(p.uuid));
@@ -639,8 +865,10 @@ window.addEventListener('DOMContentLoaded', () => {
         if (iconIds.length) {
             const res = await fetch('/rest/spaces/icon?' + API, {
                 method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ids: iconIds }),
+                signal: AbortSignal.timeout(ICON_TIMEOUT_MS),
             });
-            const { icons } = res.ok ? await res.json() : {};
+            if (!res.ok) throw new Error('project icons ' + res.status);
+            const { icons } = await res.json();
             for (const { id, symbol } of Array.isArray(icons) ? icons : []) {
                 if (typeof symbol !== 'string' || !/^<symbol id="[^"]*"/.test(symbol) || !symbol.endsWith('</symbol>')) continue;
                 const svg = symbol.replace(/^<symbol id="[^"]*"/, '<svg xmlns="http://www.w3.org/2000/svg"').replace(/<\/symbol>$/, '</svg>');
@@ -695,8 +923,14 @@ window.addEventListener('DOMContentLoaded', () => {
     }
     // end warmProjects
 
-    function refreshProjectIcons() {
-        paintProjectIcons().catch((err) => console.warn('[simplex] project icons:', err.message));
+    // The icons are fetched once per page, so one lookup lost to a stalled
+    // connection left the sidebar grey until a project page was opened. Retry
+    // with backoff (2, 4, 8, 16, 32 s), as the page's own calls do.
+    function refreshProjectIcons(attempt = 0) {
+        paintProjectIcons().catch((err) => {
+            console.warn('[simplex] project icons:', err.message);
+            if (attempt < 5) setTimeout(() => refreshProjectIcons(attempt + 1), 2000 * 2 ** attempt);
+        });
     }
 
     // PowerShell, cmd and plain shell blocks came out one grey: Perplexity's

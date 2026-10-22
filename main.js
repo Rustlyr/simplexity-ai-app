@@ -264,8 +264,10 @@ function registerShortcuts() {
   globalShortcut.unregisterAll();
 
   const shortcutActions = {
-    perplexityAI: () => switchView('tab1'),
-    secondTab: () => switchView('tab2'),
+    // "First tab" / "Second tab" in Settings mean by position, like Cmd+1/Cmd+2 in the
+    // Window menu. Tab ids are not positions: after a close, `tab2` can be first.
+    perplexityAI: () => { if (tabOrder[0]) switchView(tabOrder[0]); },
+    secondTab: () => { if (tabOrder[1]) switchView(tabOrder[1]); },
     sendToTray: () => mainWindow.hide(),
     restoreApp: () => {
       if (mainWindow.isMinimized() || !mainWindow.isVisible()) {
@@ -1868,8 +1870,37 @@ app.whenReady().then(() => {
   const started = new Map();
   let resumedAt = 0;
   powerMonitor.on('resume', () => { resumedAt = Date.now(); });
-  session.defaultSession.webRequest.onSendHeaders(api, (details) => { started.set(details.id, details.timestamp); });
+  session.defaultSession.webRequest.onSendHeaders(api, (details) => {
+    if (!details.url.includes('/rest/sse/')) started.set(details.id, details.timestamp);
+  });
+
+  // The freezes in slow-requests.log are not slow answers: every Perplexity call
+  // stalls at once (bursts of 9-36), until the page gives up at about 10 s with
+  // ERR_ABORTED, and the sidebar's icon lookup dies with them. That is a dead
+  // connection (after sleep or a VPN reconnect) that Chromium keeps reusing. When
+  // several calls are stuck and none has finished for a while, drop every pooled
+  // connection: the page's own retries then go out on a fresh one. Not while an
+  // answer is streaming, which a reset would cut.
+  const STALL_MS = 3500;
+  const STALL_MIN_STUCK = 3;
+  const RESET_COOLDOWN_MS = 30000;
+  let lastApiEnd = Date.now();
+  let lastReset = 0;
+  setInterval(() => {
+    const now = Date.now();
+    if (!started.size || answering.size || now - lastApiEnd < STALL_MS || now - lastReset < RESET_COOLDOWN_MS) return;
+    let stuck = 0;
+    for (const t of started.values()) if (now - t > STALL_MS) stuck++;
+    if (stuck < STALL_MIN_STUCK) return;
+    lastReset = now;
+    session.defaultSession.closeAllConnections().catch(() => {});
+    fs.appendFile(path.join(app.getPath('userData'), 'slow-requests.log'),
+      `${new Date().toISOString()}  RESET  ${stuck} calls stuck over ${STALL_MS} ms, none finished; closed all connections\n`, () => {});
+  }, 1000).unref();
+
   const apiEnded = (details) => {
+    // Trackers cancelled here end within a millisecond and prove nothing about the connection.
+    if (!/BLOCKED_BY_CLIENT/.test(details.error || '')) lastApiEnd = Date.now();
     answerEnded(details);
     // Blocked trackers and the answer stream the page closes itself are not failures.
     // onCompleted also carries an error field ("net::OK"), so go by the status when there is one.
