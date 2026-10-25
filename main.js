@@ -262,6 +262,11 @@ ensureShortcutsFormat();
 
 function registerShortcuts() {
   globalShortcut.unregisterAll();
+  // These keys are system-wide while registered, so they exist only while Simplex has
+  // focus (blur/hide unregister them, 'focus' calls back here). Without this check a
+  // load, a closed Settings window or a settings save in the background registered them,
+  // and Cmd+1 in another app jumped to Simplex.
+  if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isFocused()) return;
 
   const shortcutActions = {
     // "First tab" / "Second tab" in Settings mean by position, like Cmd+1/Cmd+2 in the
